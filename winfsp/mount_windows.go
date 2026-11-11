@@ -57,8 +57,9 @@ func Mount(e *export.Export, mountpoint string) (*Server, error) {
 	return &Server{vol: vol, mountpoint: mountpoint, done: make(chan struct{})}, nil
 }
 
-// Unmount removes the drive, ending every open handle on it.
-func (s *Server) Unmount() error {
+// Unmount removes the drive, ending every open handle on it, so it never needs
+// force.
+func (s *Server) Unmount(bool) error {
 	s.once.Do(func() {
 		s.vol.Unmount()
 		close(s.done)

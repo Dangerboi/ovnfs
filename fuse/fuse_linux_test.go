@@ -115,7 +115,7 @@ func (f *fixture) unmount(t *testing.T) {
 	if f.srv == nil {
 		return
 	}
-	if err := f.srv.Unmount(); err != nil {
+	if err := f.srv.Unmount(false); err != nil {
 		t.Error(err)
 	}
 	f.srv.Wait()
@@ -420,6 +420,44 @@ func TestMountReplacesDeadMount(t *testing.T) {
 	f.mount(t)
 	f.read(t, "alpha/file", "lower")
 }
+
+// TestForcedUnmountEndsBusyMount checks that a forced Unmount ends a mount the
+// plain one refuses while a file on it is open (the daemon's "stop again to
+// force"): the mountpoint is a plain directory again, and the holder's
+// descriptor fails instead of reaching the export.
+func TestForcedUnmountEndsBusyMount(t *testing.T) {
+	var sfs unix.Statfs_t
+	if err := unix.Statfs("/sys/fs/fuse/connections", &sfs); err != nil || sfs.Type != fusectlMagic {
+		t.Skip("fusectl is not mounted at /sys/fs/fuse/connections")
+	}
+	f := newFixture(t, map[string]string{"held": "never read", "file": "lower"})
+	if f.srv.abort == nil {
+		t.Fatal("fusectl is mounted, but Mount found no abort file for its connection")
+	}
+	held, err := os.Open(f.path("alpha/held"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := f.srv.Unmount(false); err == nil {
+		t.Fatal("plain unmount succeeded while a file on the mount is open")
+	}
+	f.read(t, "alpha/file", "lower")
+
+	if err := f.srv.Unmount(true); err != nil {
+		t.Fatalf("forced unmount: %v", err)
+	}
+	f.srv = nil
+	if names, err := os.ReadDir(f.mnt); err != nil || len(names) != 0 {
+		t.Fatalf("mountpoint after forced unmount lists %v, %v; want an empty directory", names, err)
+	}
+	if n, err := held.ReadAt(make([]byte, 4), 0); err == nil {
+		t.Fatalf("read through the ended mount returned %d bytes", n)
+	}
+}
+
+// fusectlMagic is the control filesystem's FUSE_CTL_SUPER_MAGIC.
+const fusectlMagic = 0x65735543
 
 // TestChangesUnderneathShowWithinTTL checks that edits and checkout removals made
 // outside the mount reach it once the kernel's short caches expire.
