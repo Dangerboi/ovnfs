@@ -342,7 +342,7 @@ func (r *Registry) publishBase(ctx context.Context, name, id string, b *baseReco
 		}
 	}
 	if err != nil {
-		cleanupErr := errors.Join(os.RemoveAll(r.upperPath(name)), os.RemoveAll(r.gitdirPath(name)))
+		cleanupErr := errors.Join(removeTree(r.upperPath(name)), removeTree(r.gitdirPath(name)))
 		delete(r.reserved, name)
 		delete(r.intents, name)
 		persistErr := r.persistLocked()
@@ -860,7 +860,7 @@ func (r *Registry) createFromSnapshotLocked(ctx context.Context, name string, s 
 		delete(r.checkouts, name)
 		r.releaseLocked(s.base, s.stack)
 	}
-	return nil, errors.Join(err, os.RemoveAll(r.upperPath(name)), os.RemoveAll(r.gitdirPath(name)), r.persistLocked())
+	return nil, errors.Join(err, removeTree(r.upperPath(name)), removeTree(r.gitdirPath(name)), r.persistLocked())
 }
 
 // created adds the checkout's git remote (syncRemotes) and notifies export
@@ -1168,7 +1168,7 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 		}
 		if renamed {
 			h.meta.Copied = oldCopied
-			if e := os.RemoveAll(h.upper); e != nil {
+			if e := removeTree(h.upper); e != nil {
 				rollbackErr = errors.Join(rollbackErr, e)
 			}
 			if e := os.Rename(filepath.Join(r.config.State, "layers", layerID), h.upper); e != nil {
@@ -1308,7 +1308,7 @@ func (r *Registry) remove(ctx context.Context, name string, picked time.Time, st
 	} else if !stickySnapshots {
 		err = r.dropCheckoutSnapshots(name)
 	}
-	removeErr := errors.Join(os.RemoveAll(r.gitdirPath(h.meta.dir())), os.RemoveAll(h.upper))
+	removeErr := errors.Join(removeTree(r.gitdirPath(h.meta.dir())), removeTree(h.upper))
 	r.mu.Lock()
 	if removeErr == nil {
 		delete(r.reserved, name)

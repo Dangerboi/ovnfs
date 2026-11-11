@@ -513,7 +513,7 @@ func (r *Registry) abandonCheckout(name string, h *checkoutRecord, b *baseRecord
 		h.fs.CloseFiles()
 		dir, b = h.meta.dir(), h.base
 	}
-	err := coded(errors.Join(cause, os.RemoveAll(r.upperPath(dir)), os.RemoveAll(r.gitdirPath(dir))))
+	err := coded(errors.Join(cause, removeTree(r.upperPath(dir)), removeTree(r.gitdirPath(dir))))
 	r.mu.Lock()
 	delete(r.reserved, name)
 	r.releaseLocked(b, nil)
@@ -566,7 +566,7 @@ func (r *Registry) fillPool(f *reuseFolder) {
 		r.mu.Unlock()
 		if err != nil {
 			if dir != "" {
-				err = errors.Join(err, os.RemoveAll(r.upperPath(dir)), os.RemoveAll(r.gitdirPath(dir)))
+				err = errors.Join(err, removeTree(r.upperPath(dir)), removeTree(r.gitdirPath(dir)))
 			}
 			r.enqueueNotice(baseNotice{base: b.view.Meta().ID, fault: "prepare checkout: " + err.Error()})
 			r.mu.Lock()
@@ -586,7 +586,7 @@ func (r *Registry) discardPrepared(pool []*checkoutRecord) {
 		h.fs.Discard()
 		h.fs.CloseFiles()
 		dir := h.meta.dir()
-		if err := errors.Join(os.RemoveAll(r.upperPath(dir)), os.RemoveAll(r.gitdirPath(dir))); err != nil {
+		if err := errors.Join(removeTree(r.upperPath(dir)), removeTree(r.gitdirPath(dir))); err != nil {
 			r.enqueueNotice(baseNotice{base: h.meta.Base, fault: "remove prepared checkout: " + err.Error()})
 		}
 	}

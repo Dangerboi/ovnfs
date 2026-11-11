@@ -348,10 +348,10 @@ func recoverIntents(state string, d *diskState) error {
 			if hi >= 0 {
 				continue
 			}
-			if err := os.RemoveAll(upper); err != nil {
+			if err := removeTree(upper); err != nil {
 				return err
 			}
-			if err := os.RemoveAll(gitdir); err != nil {
+			if err := removeTree(gitdir); err != nil {
 				return err
 			}
 			if intent.Layer != "" && !baseUsed(d, intent.Layer) {
@@ -397,7 +397,7 @@ func recoverIntents(state string, d *diskState) error {
 				}
 			} else {
 				if frozen && hi >= 0 {
-					if err := os.RemoveAll(upper); err != nil {
+					if err := removeTree(upper); err != nil {
 						return err
 					}
 					if err := os.Rename(layerDir, upper); err != nil {
@@ -412,10 +412,10 @@ func recoverIntents(state string, d *diskState) error {
 				}
 			}
 		case "removing":
-			if err := os.RemoveAll(gitdir); err != nil {
+			if err := removeTree(gitdir); err != nil {
 				return err
 			}
-			if err := os.RemoveAll(upper); err != nil {
+			if err := removeTree(upper); err != nil {
 				return err
 			}
 			if hi >= 0 {

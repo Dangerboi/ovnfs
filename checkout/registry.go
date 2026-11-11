@@ -709,7 +709,7 @@ func (r *Registry) collectGarbage() {
 		roots := r.treeRootsLocked()
 		r.mu.Unlock()
 		for _, l := range deadLayers {
-			if err := os.RemoveAll(l.layer.Dir()); err != nil {
+			if err := removeTree(l.layer.Dir()); err != nil {
 				r.enqueueNotice(baseNotice{fault: "remove layer " + l.id + ": " + err.Error()})
 			}
 		}
@@ -918,6 +918,8 @@ func (r *Registry) emit(event Event) {
 }
 
 // removeOrphansLocked reclaims filesystem leftovers not named by the recovered manifest.
+// A leftover that cannot be removed is reported as a fault and kept for the next
+// open: it is no reason to keep every other checkout down.
 func (r *Registry) removeOrphansLocked() error {
 	dirs := make(map[string]bool, len(r.checkouts))
 	for _, h := range r.checkouts {
@@ -942,8 +944,8 @@ func (r *Registry) removeOrphansLocked() error {
 				retained = dirs[name]
 			}
 			if !retained {
-				if err = os.RemoveAll(filepath.Join(r.config.State, kind, name)); err != nil {
-					return err
+				if err = removeTree(filepath.Join(r.config.State, kind, name)); err != nil {
+					r.enqueueNotice(baseNotice{fault: "remove leftover " + kind + "/" + name + ": " + err.Error()})
 				}
 			}
 		}
