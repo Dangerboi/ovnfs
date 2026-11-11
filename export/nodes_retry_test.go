@@ -134,11 +134,20 @@ func TestColdStoreLifecycle(t *testing.T) {
 	cold := nt.coldRoot
 	closeLogged(t, nt)
 	if _, err := os.Stat(cold); err != nil {
-		t.Fatal("planned close touched store", err)
+		t.Fatal("planned close removed store", err)
+	}
+	nt = openLogged(t, name, ns)
+	if nt.coldRoot != cold {
+		t.Fatalf("reopen after a clean close used %q, not the completed store", nt.coldRoot)
+	}
+	closeLogged(t, nt)
+	// The store belongs to the log it was completed for.
+	if err := os.WriteFile(name, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	nt = openLogged(t, name, ns)
 	defer closeLogged(t, nt)
 	if _, err := os.Stat(cold); !os.IsNotExist(err) {
-		t.Fatal("reopen retained previous store", err)
+		t.Fatal("reopen with another log retained the store", err)
 	}
 }

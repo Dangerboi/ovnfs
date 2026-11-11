@@ -13,10 +13,12 @@ import (
 // Node ids come in two kinds. Counter ids, below derivedBit, are allocated
 // in sequence and recorded in the identity log. Derived ids are derivedBit,
 // the key of the parent directory and a 22-bit hash of the name: reading a
-// fresh view hands them out without writing anything, and after a restart
-// such an id is resolved again by listing the parent directory. A derived id
-// is only handed out while its name is the one entry of that hash in the
-// directory that no other node owns, the rule resolution applies.
+// fresh view hands them out without writing anything. After a clean restart
+// the owner index (nodes_cold.go) still names the owner of each issued or
+// retired hash; after a crash such an id is resolved again by listing the
+// parent directory. A derived id is only handed out while its name is the
+// one entry of that hash in the directory that no other node owns, the rule
+// resolution applies.
 //
 // Every node with children is logged, under a counter id or under its
 // derived id pinned in place, and owns a key: its id for counter nodes, a
@@ -63,6 +65,8 @@ type nodeTable struct {
 	coldInit     bool
 	coldRoot     string
 	coldParent   string
+	coldSaved    bool   // close completed the index for the next open; nothing rewrites it
+	coldPack     string // the pack holding packed directories' indexes, if any
 	coldStop     chan struct{}
 	reclaimIO    func() // optional reclamation barrier
 	coldBytes    int64
@@ -112,7 +116,10 @@ type dirState struct {
 	cold       bool
 	coldLoaded bool  // all disk owners are resident until the next eviction
 	coldBytes  int64 // size of the directory index on disk
-	coldDirty  bool  // newly issued names not yet present in the disposable index
+	coldDirty  bool  // issued names or retired hashes not yet present in the index
+	prior      bool  // the index was adopted from before this open and not yet rewritten
+	packed     bool  // the index is the segment at base of the adopted pack, not a file of its own
+	base       int64
 	reading    int
 	cached     int64 // estimated bytes of listing, leaves and unlogged children
 	recent     *list.Element
@@ -123,7 +130,8 @@ type dirState struct {
 	// dups lists every name of each ambiguous hash of the latest listing.
 	dups map[uint32][]string
 	// retired holds the hashes of retired derived children: their ids are
-	// never handed out again in this process.
+	// never handed out again while the directory's key lives. The index
+	// carries them across clean restarts.
 	retired map[uint32]struct{}
 	// leaves maps the name hash of each leaf to its name, shared with the
 	// listing it was derived from where possible.
@@ -637,8 +645,7 @@ func (t *nodeTable) takenExceptCold(d *node, h uint32) bool {
 		return false
 	}
 	_, leaf := s.leaves[h]
-	_, gone := s.retired[h]
-	return leaf || gone
+	return leaf || s.isRetired(h)
 }
 
 // resolve finds the entry a derived id that no node holds names, as its
@@ -660,7 +667,7 @@ func (t *nodeTable) resolve(id uint64) (*node, string) {
 			return nil, ""
 		}
 		if s := d.dir; s != nil {
-			if _, gone := s.retired[h]; gone {
+			if s.isRetired(h) {
 				return nil, ""
 			}
 			if s.cold && t.cacheErr != nil {
@@ -694,7 +701,7 @@ func (t *nodeTable) resolve(id uint64) (*node, string) {
 				}
 				// Ownership can change while the read is unlocked. Prefer the live
 				// owner, and never revive a retired hash or replace another node.
-				if _, gone := s.retired[h]; gone {
+				if s.isRetired(h) {
 					return nil, ""
 				}
 				if current, ok := s.leaves[h]; ok {
@@ -943,6 +950,20 @@ func (t *nodeTable) child(d *node, name string) *node {
 	return k
 }
 
+// retire reserves hash h of a removed derived child.
+func (s *dirState) retire(h uint32) {
+	if s.retired == nil {
+		s.retired = make(map[uint32]struct{})
+	}
+	s.retired[h] = struct{}{}
+}
+
+// isRetired reports whether hash h of a removed derived child is reserved.
+func (s *dirState) isRetired(h uint32) bool {
+	_, gone := s.retired[h]
+	return gone
+}
+
 // state returns n's directory state, creating it on first use.
 func (n *node) state() *dirState {
 	if n.dir == nil {
@@ -987,9 +1008,9 @@ func (t *nodeTable) find(p string) *node {
 }
 
 // drop retires an entire subtree under the mutex. Its derived ids stay
-// reserved in their directories for the life of the process; the keys of
-// dropped directories are never issued again, so ids derived from them die
-// with them.
+// reserved in their directories, across clean restarts through the index;
+// the keys of dropped directories are never issued again, so ids derived from
+// them die with them.
 func (t *nodeTable) drop(n *node) {
 	if n == nil || n == t.root {
 		return
@@ -1019,10 +1040,10 @@ func (t *nodeTable) drop(n *node) {
 		if n.id&derivedBit != 0 {
 			if d := t.byKey[n.id>>hashBits&(maxDerivingKey-1)]; d != nil {
 				s := d.state()
-				if s.retired == nil {
-					s.retired = make(map[uint32]struct{})
+				if h := uint32(n.id & (1<<hashBits - 1)); !s.isRetired(h) {
+					s.retire(h)
+					s.coldDirty = true
 				}
-				s.retired[uint32(n.id&(1<<hashBits-1))] = struct{}{}
 			}
 		}
 		for _, k := range n.kids {

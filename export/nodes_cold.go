@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,14 +13,32 @@ import (
 	"syscall"
 )
 
-// Cold identities retain their exact names in a disposable disk index. A
-// listing alone cannot reconstruct an issued id after an external removal or a
-// new name with the same hash. These files are not the identity log: they last
-// only for this process, and a restart still uses ordinary derived resolution.
-// Each file is a sorted array of 16-byte (hash, name length, offset) records,
-// followed by name bytes. Recovery reads at most one directory at a time.
+// Cold identities retain their exact names in a disk index, beside the hashes
+// of retired names. A listing alone cannot reconstruct an issued id after an
+// external removal or a new name with the same hash. These files are not the
+// identity log: a clean close completes them for the next open to adopt
+// (nodes_reclaim.go), while a crash discards them and handles issued before it
+// resolve by listing again. Each file is a sorted array of 16-byte (hash, name
+// length, offset) records, followed by name bytes; a zero length marks a
+// retired hash. Recovery reads at most one directory at a time.
 func (t *nodeTable) coldPath(d *node) string {
 	return coldIndexPath(t.coldRoot, d.key)
+}
+
+// coldIndex locates a directory's published index: its own file, or a segment
+// of the pack a clean close wrote for the next open.
+type coldIndex struct {
+	file       string
+	base, size int64
+}
+
+// coldIndexOf returns where d's published index lives, under mu.
+func (t *nodeTable) coldIndexOf(d *node) coldIndex {
+	s := d.dir
+	if s.packed {
+		return coldIndex{t.coldPack, s.base, s.coldBytes}
+	}
+	return coldIndex{t.coldPath(d), 0, s.coldBytes}
 }
 
 // Low key bits distribute consecutive directory keys across 256 shards.
@@ -28,27 +47,29 @@ func coldIndexPath(root string, key uint64) string {
 }
 
 // readColdName searches the sorted index without allocating its other owners.
-// size is the last published index size, validated again by the caller after I/O.
-func readColdName(file string, size int64, hash uint32) (string, error) {
-	f, err := os.Open(file)
+// ix is the last published location, validated again by the caller after I/O.
+// retired reports a removed name's hash, which has no owner.
+func readColdName(ix coldIndex, hash uint32) (name string, retired bool, err error) {
+	f, err := os.Open(ix.file)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	defer f.Close()
+	size := ix.size
 	var row [16]byte
-	if _, err := f.ReadAt(row[:4], 0); err != nil {
-		return "", err
+	if _, err := f.ReadAt(row[:4], ix.base); err != nil {
+		return "", false, err
 	}
 	count := int64(binary.LittleEndian.Uint32(row[:4]))
 	end := 4 + count*16
 	if end > size {
-		return "", io.ErrUnexpectedEOF
+		return "", false, io.ErrUnexpectedEOF
 	}
 	lo, hi := int64(0), count
 	for lo < hi {
 		mid := lo + (hi-lo)/2
-		if _, err := f.ReadAt(row[:], 4+mid*16); err != nil {
-			return "", err
+		if _, err := f.ReadAt(row[:], ix.base+4+mid*16); err != nil {
+			return "", false, err
 		}
 		h := binary.LittleEndian.Uint32(row[:4])
 		if h < hash {
@@ -61,54 +82,87 @@ func readColdName(file string, size int64, hash uint32) (string, error) {
 		}
 		length, offset := uint64(binary.LittleEndian.Uint32(row[4:8])), binary.LittleEndian.Uint64(row[8:])
 		if offset < uint64(end) || offset > uint64(size) || length > uint64(size)-offset {
-			return "", io.ErrUnexpectedEOF
+			return "", false, io.ErrUnexpectedEOF
+		}
+		if length == 0 {
+			return "", true, nil
 		}
 		name := make([]byte, int(length))
-		if _, err := f.ReadAt(name, int64(offset)); err != nil {
-			return "", err
+		if _, err := f.ReadAt(name, ix.base+int64(offset)); err != nil {
+			return "", false, err
 		}
-		return string(name), nil
+		return string(name), false, nil
 	}
-	return "", nil
+	return "", false, nil
 }
 
-// readColdNames reads one directory's issued identities for a rewrite or subtree
-// invalidation. The temporary allocation is at most one directory's identities.
-func readColdNames(file string) (map[uint32]string, error) {
-	names := make(map[uint32]string)
-	data, err := os.ReadFile(file)
+// readColdNames reads one directory's issued identities and retired hashes for
+// a rewrite or subtree invalidation. The temporary allocation is at most one
+// directory's identities.
+func readColdNames(ix coldIndex) (names map[uint32]string, retired []uint32, err error) {
+	data, err := readColdIndex(ix)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
+	names = make(map[uint32]string)
 	if len(data) < 4 {
-		return nil, io.ErrUnexpectedEOF
+		return nil, nil, io.ErrUnexpectedEOF
 	}
 	n := binary.LittleEndian.Uint32(data[:4])
 	if uint64(n)*16+4 > uint64(len(data)) {
-		return nil, io.ErrUnexpectedEOF
+		return nil, nil, io.ErrUnexpectedEOF
 	}
 	for i := uint32(0); i < n; i++ {
 		row := data[4+int(i)*16:]
 		h, size, offset := binary.LittleEndian.Uint32(row[:4]), binary.LittleEndian.Uint32(row[4:8]), binary.LittleEndian.Uint64(row[8:16])
 		if offset > uint64(len(data)) || uint64(size) > uint64(len(data))-offset {
-			return nil, io.ErrUnexpectedEOF
+			return nil, nil, io.ErrUnexpectedEOF
+		}
+		if size == 0 {
+			retired = append(retired, h)
+			continue
 		}
 		names[h] = string(data[offset : offset+uint64(size)])
 	}
-	return names, nil
+	return names, retired, nil
+}
+
+// readColdIndex reads a published index whole, after checking the file holds
+// it: an adopted manifest's size is not trusted for an allocation.
+func readColdIndex(ix coldIndex) ([]byte, error) {
+	f, err := os.Open(ix.file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if ix.base < 0 || ix.size < 0 || ix.size > info.Size()-ix.base {
+		return nil, io.ErrUnexpectedEOF
+	}
+	data := make([]byte, ix.size)
+	if _, err := f.ReadAt(data, ix.base); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 // spillNames preserves issued unlogged ownership before reclaiming its memory.
 func (t *nodeTable) spillNames(d *node) (bool, error) {
-	if d.dir.cold && !d.dir.coldDirty {
+	if t.coldSaved {
+		return false, nil // the next open adopts the index as close left it
+	}
+	s := d.dir
+	if s.cold && !s.coldDirty {
 		return true, nil
 	}
 	names := make(map[uint32]string)
+	var retired []uint32
 	var err error
-	if d.dir.cold && !d.dir.coldLoaded {
-		s := d.dir
-		gen, location, file := s.gen, nodeLocation(d), t.coldPath(d)
+	if s.cold && !s.coldLoaded {
+		gen, location, ix := s.gen, nodeLocation(d), t.coldIndexOf(d)
 		if s.indexing != nil {
 			return false, nil
 		}
@@ -117,7 +171,7 @@ func (t *nodeTable) spillNames(d *node) (bool, error) {
 		if t.indexIO != nil {
 			t.indexIO()
 		}
-		names, err = readColdNames(file)
+		names, retired, err = readColdNames(ix)
 		t.mu.Lock()
 		s.reading--
 		if t.byID[d.id] != d || s.gen != gen || !sameLocation(d, location) {
@@ -125,32 +179,14 @@ func (t *nodeTable) spillNames(d *node) (bool, error) {
 		}
 	}
 	if err != nil {
-		t.cacheFailure(err) // this index already owns evicted identities
-		return false, err
-	}
-	changed := !d.dir.cold
-	for h, name := range d.dir.leaves {
-		changed = changed || names[h] != name
-		names[h] = name
-	}
-	for name, k := range d.kids {
-		if k.key == 0 {
-			changed = changed || names[nameHash(name)] != name
-			names[nameHash(name)] = name
+		if !s.prior {
+			t.cacheFailure(err) // this index already owns evicted identities
+			return false, err
 		}
+		t.forgetPrior(d)
+		names, retired = make(map[uint32]string), nil
 	}
-	for h := range names {
-		if _, gone := d.dir.retired[h]; gone || t.byID[derivedID(d.key, h)] != nil && t.byID[derivedID(d.key, h)].key != 0 {
-			delete(names, h)
-			changed = true
-		}
-	}
-	if len(names) == 0 {
-		d.dir.coldDirty = false
-		return true, nil
-	}
-	if !changed {
-		d.dir.coldDirty = false
+	if !t.ownersToWrite(d, names, retired) {
 		return true, nil
 	}
 	if t.coldRoot == "" {
@@ -175,13 +211,13 @@ func (t *nodeTable) spillNames(d *node) (bool, error) {
 		// Ownership may have changed during directory creation. Start over.
 		return t.spillNames(d)
 	}
-	s := d.dir
 	if s.indexing != nil {
 		return false, nil
 	}
 	gen, version, location := s.gen, s.version, nodeLocation(d)
 	resident := !s.cold || s.coldLoaded
 	target := t.coldPath(d)
+	gone := maps.Clone(s.retired)
 	s.indexing = &coldOperation{done: make(chan struct{})}
 	s.reading++
 	t.mu.Unlock()
@@ -193,7 +229,7 @@ func (t *nodeTable) spillNames(d *node) (bool, error) {
 	var file string
 	var size int64
 	if err == nil {
-		file, size, err = writeColdNames(filepath.Dir(target), names)
+		file, size, err = writeColdNames(filepath.Dir(target), names, gone)
 	}
 	t.mu.Lock()
 	s.reading--
@@ -227,7 +263,7 @@ func (t *nodeTable) spillNames(d *node) (bool, error) {
 		return false, err
 	}
 	t.coldBytes += size - s.coldBytes
-	s.coldBytes, s.cold = size, true
+	s.coldBytes, s.cold, s.prior, s.packed = size, true, false, false
 	// Publishing the first index does not discard its resident owners. A
 	// guard acquired during the write must still finish without recovery.
 	s.coldLoaded = s.coldLoaded || resident
@@ -236,21 +272,45 @@ func (t *nodeTable) spillNames(d *node) (bool, error) {
 	return valid, nil
 }
 
-func writeColdNames(root string, names map[uint32]string) (file string, size int64, err error) {
-	hashes := make([]uint32, 0, len(names))
+// ownersToWrite completes names, read from d's index file with its retired
+// hashes (both empty when nothing was read), into the owners d's file must
+// hold: resident leaves and unlogged children, without retired or logged
+// hashes. It reports whether the file must be rewritten, else clears coldDirty.
+func (t *nodeTable) ownersToWrite(d *node, names map[uint32]string, retired []uint32) bool {
+	s := d.dir
+	for _, h := range retired {
+		s.retire(h)
+	}
+	// Resident owners of a loaded or unindexed directory are complete, and
+	// coldDirty says they differ from the file. Otherwise compare with it.
+	changed := !s.cold || s.coldLoaded || len(s.retired) != len(retired)
+	for h, name := range s.leaves {
+		changed = changed || names[h] != name
+		names[h] = name
+	}
+	for name, k := range d.kids {
+		if k.key == 0 {
+			changed = changed || names[nameHash(name)] != name
+			names[nameHash(name)] = name
+		}
+	}
 	for h := range names {
-		hashes = append(hashes, h)
+		if s.isRetired(h) || t.byID[derivedID(d.key, h)] != nil && t.byID[derivedID(d.key, h)].key != 0 {
+			delete(names, h)
+			changed = true
+		}
 	}
-	slices.Sort(hashes)
-	data := make([]byte, 4+16*len(hashes))
-	binary.LittleEndian.PutUint32(data[:4], uint32(len(hashes)))
-	for i, h := range hashes {
-		row := data[4+16*i:]
-		binary.LittleEndian.PutUint32(row[:4], h)
-		binary.LittleEndian.PutUint32(row[4:8], uint32(len(names[h])))
-		binary.LittleEndian.PutUint64(row[8:16], uint64(len(data)))
-		data = append(data, names[h]...)
+	if !changed || len(names) == 0 && len(s.retired) == 0 {
+		s.coldDirty = false
+		return false
 	}
+	return true
+}
+
+// writeColdNames writes a directory's owners and retired hashes to a new
+// temporary file below root.
+func writeColdNames(root string, names map[uint32]string, retired map[uint32]struct{}) (file string, size int64, err error) {
+	data := encodeColdNames(names, retired)
 	f, err := os.CreateTemp(root, ".names-*")
 	if err != nil {
 		return "", 0, err
@@ -267,6 +327,28 @@ func writeColdNames(root string, names map[uint32]string) (file string, size int
 	return f.Name(), int64(len(data)), nil
 }
 
+// encodeColdNames lays out an index file. names and retired are disjoint.
+func encodeColdNames(names map[uint32]string, retired map[uint32]struct{}) []byte {
+	hashes := make([]uint32, 0, len(names)+len(retired))
+	for h := range names {
+		hashes = append(hashes, h)
+	}
+	for h := range retired {
+		hashes = append(hashes, h)
+	}
+	slices.Sort(hashes)
+	data := make([]byte, 4+16*len(hashes))
+	binary.LittleEndian.PutUint32(data[:4], uint32(len(hashes)))
+	for i, h := range hashes {
+		row := data[4+16*i:]
+		binary.LittleEndian.PutUint32(row[:4], h)
+		binary.LittleEndian.PutUint32(row[4:8], uint32(len(names[h]))) // zero for a retired hash
+		binary.LittleEndian.PutUint64(row[8:16], uint64(len(data)))
+		data = append(data, names[h]...)
+	}
+	return data
+}
+
 // cacheFailure fails closed only when an authoritative cold owner cannot be read.
 // Spill write failures leave ownership resident and use a separate retry state.
 func (t *nodeTable) cacheFailure(err error) {
@@ -276,9 +358,21 @@ func (t *nodeTable) cacheFailure(err error) {
 	}
 }
 
+// forgetPrior drops an adopted index that cannot be read. Its owners are lost
+// as a crash would have lost them: the directory resolves by listing again.
+// An index written by this process stays authoritative instead.
+func (t *nodeTable) forgetPrior(d *node) {
+	s := d.dir
+	if !s.prior {
+		return
+	}
+	t.coldBytes -= s.coldBytes
+	s.prior, s.packed, s.cold, s.coldLoaded, s.coldBytes = false, false, false, false, 0
+}
+
 type nodeCacheFault struct{ err error }
 
-// IdentityError reports an unusable disposable index without taking the node
+// IdentityError reports an unusable index without taking the node
 // mutex on each protocol request. Restart is required to clear a fault.
 func (n *nodeFS) IdentityError() error {
 	if fault := n.nodes.fault.Load(); fault != nil {
@@ -380,11 +474,14 @@ type coldOperation struct {
 	done     chan struct{}
 	read     bool
 	single   bool
+	prior    bool // read an adopted index, whose failure only loses its owners
 	hash     uint32
 	name     string
+	gone     bool // a single read found hash retired
 	gen      uint64
 	location []nodePosition
 	names    map[uint32]string
+	retired  []uint32
 	err      error
 }
 
@@ -406,31 +503,43 @@ func (t *nodeTable) readOwners(d *node) (map[uint32]string, bool) {
 			}
 			return t.readResult(d, op)
 		}
-		op := &coldOperation{done: make(chan struct{}), read: true, gen: s.gen, location: nodeLocation(d)}
+		op := &coldOperation{done: make(chan struct{}), read: true, prior: s.prior, gen: s.gen, location: nodeLocation(d)}
 		s.indexing = op
 		s.reading++
-		file := t.coldPath(d)
+		ix := t.coldIndexOf(d)
 		t.mu.Unlock()
 		if t.indexIO != nil {
 			t.indexIO()
 		}
-		names, err := readColdNames(file)
+		names, retired, err := readColdNames(ix)
 		t.mu.Lock()
 		s.reading--
-		op.names, op.err = names, err
+		op.names, op.retired, op.err = names, retired, err
 		close(op.done)
 		s.indexing = nil
 		return t.readResult(d, op)
 	}
 }
 
+// readResult validates a finished read for d. Retired hashes it found join
+// d's resident ones; an unreadable adopted index yields no owners.
 func (t *nodeTable) readResult(d *node, op *coldOperation) (map[uint32]string, bool) {
 	if t.cacheErr != nil || t.byID[d.id] != d || d.dir.gen != op.gen || !sameLocation(d, op.location) {
 		return nil, false
 	}
 	if op.err != nil {
+		if op.prior {
+			t.forgetPrior(d)
+			return nil, true
+		}
 		t.cacheFailure(op.err)
 		return nil, false
+	}
+	for _, h := range op.retired {
+		d.dir.retire(h)
+	}
+	if op.gone {
+		d.dir.retire(op.hash)
 	}
 	return op.names, true
 }
@@ -476,18 +585,18 @@ func (t *nodeTable) readOwner(d *node, hash uint32) (string, bool) {
 			_, valid := t.readResult(d, op)
 			return op.name, valid
 		}
-		op := &coldOperation{done: make(chan struct{}), read: true, single: true, hash: hash, gen: s.gen, location: nodeLocation(d)}
+		op := &coldOperation{done: make(chan struct{}), read: true, single: true, prior: s.prior, hash: hash, gen: s.gen, location: nodeLocation(d)}
 		s.indexing = op
 		s.reading++
-		file, size := t.coldPath(d), s.coldBytes
+		ix := t.coldIndexOf(d)
 		t.mu.Unlock()
 		if t.indexIO != nil {
 			t.indexIO()
 		}
-		name, err := readColdName(file, size, hash)
+		name, gone, err := readColdName(ix, hash)
 		t.mu.Lock()
 		s.reading--
-		op.name, op.err = name, err
+		op.name, op.gone, op.err = name, gone, err
 		close(op.done)
 		s.indexing = nil
 		_, valid := t.readResult(d, op)

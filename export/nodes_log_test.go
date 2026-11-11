@@ -1,6 +1,8 @@
 package export
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -222,6 +224,75 @@ func TestCreatedCollisionIsLogged(t *testing.T) {
 	}
 	if nt.id(b) == idA {
 		t.Fatal("newcomer took the derived id")
+	}
+}
+
+// TestOwnersSurviveCleanRestart keeps a derived id on the name it was issued
+// for across clean restarts, resident or evicted, after that name was replaced
+// behind the export or removed through it: a newcomer with the same hash must
+// not inherit the handle.
+func TestOwnersSurviveCleanRestart(t *testing.T) {
+	a, b := "co/"+collideA, "co/"+collideB
+	for _, evicted := range []bool{false, true} {
+		for _, removed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("evicted=%v/removed=%v", evicted, removed), func(t *testing.T) {
+				name := filepath.Join(t.TempDir(), "nodes.log")
+				ns := newNamespace(a, "pressure/entry", "d0/f", "d1/f", "d2/f")
+				nt := openLogged(t, name, ns)
+				idA := nt.id(a)
+				if evicted {
+					forceCold(t, nt, ns, "co")
+				}
+				want := a
+				if removed {
+					ns.del(a)
+					nt.remove(a)
+					want = "<stale>"
+				}
+				closeLogged(t, nt)
+				ns.del(a)
+				ns.add(b)
+				for restart := range 3 {
+					nt = openLogged(t, name, ns)
+					if got := pathOf(t, nt, idA); got != want {
+						t.Fatalf("restart %d: %x → %q, want %q", restart, idA, got, want)
+					}
+					if nt.id(b) == idA {
+						t.Fatalf("restart %d: newcomer took the issued id", restart)
+					}
+					if packs, _ := filepath.Glob(filepath.Join(nt.coldRoot, "pack-*")); len(packs) > 1 {
+						t.Fatalf("restart %d: earlier packs kept: %v", restart, packs)
+					}
+					// A new owner elsewhere rewrites the pack around co's.
+					nt.id(fmt.Sprintf("d%d/f", restart))
+					closeLogged(t, nt)
+				}
+			})
+		}
+	}
+}
+
+// TestUnreadableAdoptedIndexResolvesByListing treats a damaged index from
+// before a restart as missing, as a crash would leave it, instead of failing
+// every identity operation.
+func TestUnreadableAdoptedIndexResolvesByListing(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "nodes.log")
+	ns := newNamespace("co/file")
+	nt := openLogged(t, name, ns)
+	id := nt.id("co/file")
+	closeLogged(t, nt)
+	ix := nt.coldIndexOf(nt.find("co"))
+	f, err := os.OpenFile(ix.file, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteAt([]byte{0xff, 0xff, 0xff, 0xff}, ix.base) // more records than bytes
+	if err := errors.Join(err, f.Close()); err != nil {
+		t.Fatal(err)
+	}
+	nt = openLogged(t, name, ns)
+	if got := pathOf(t, nt, id); got != "co/file" || nt.cacheErr != nil {
+		t.Fatalf("%x → %q, %v", id, got, nt.cacheErr)
 	}
 }
 

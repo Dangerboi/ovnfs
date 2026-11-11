@@ -8,6 +8,7 @@ import (
 
 // TestRecoveryAcrossDirectoryRename rejects a listing read at an old path
 // after its directory (or an ancestor) has moved and the path has been reused.
+// A crash leaves no completed index, so the pre-crash handle needs that listing.
 func TestRecoveryAcrossDirectoryRename(t *testing.T) {
 	for _, ancestor := range []bool{false, true} {
 		t.Run(map[bool]string{false: "directory", true: "ancestor"}[ancestor], func(t *testing.T) {
@@ -15,8 +16,7 @@ func TestRecoveryAcrossDirectoryRename(t *testing.T) {
 			name := filepath.Join(t.TempDir(), "nodes.log")
 			nt := openLogged(t, name, ns)
 			old := nt.id("co/d/file")
-			closeLogged(t, nt)
-			nt = openLogged(t, name, ns)
+			nt = openLogged(t, crashCopy(t, name), ns)
 			original := nt.list
 			moved := false
 			nt.list = func(dir string) ([]os.FileInfo, error) {

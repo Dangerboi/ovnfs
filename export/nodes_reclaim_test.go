@@ -24,7 +24,7 @@ func TestColdStoreOpenedBeforeReclamation(t *testing.T) {
 	var release, barrier sync.Once
 	nt.reclaimIO = func() { barrier.Do(func() { close(entered); <-resume; close(finished) }) }
 	t.Cleanup(func() { release.Do(func() { close(resume) }); nt.close(); <-finished })
-	if err := nt.openColdStore(); err != nil {
+	if err := nt.openColdStore(0); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -56,7 +56,7 @@ func TestColdStoreOpenedBeforeReclamation(t *testing.T) {
 	nt.mu.Unlock()
 	next := newNodeTable(ns.list)
 	next.coldParent = nt.coldParent
-	if err := next.openColdStore(); err != nil {
+	if err := next.openColdStore(0); err != nil {
 		t.Fatal(err)
 	}
 	defer next.close()

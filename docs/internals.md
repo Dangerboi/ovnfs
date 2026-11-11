@@ -95,6 +95,7 @@ a crash forgets the writes since.
 | `store/` | git-format objects in append-only `packs/<n>.pack` (a full pack also gets `<n>.idx`); large blobs use content-defined chunks, or plain files under `objects/` when reflinks work |
 | `sources/` | each source folder's stat cache: which files still match the blob ids of its last capture's tree |
 | `nodes.log` | stable node ids (NFS handles, inode numbers); survive restarts and follow renames. A file's id is derived from its directory and name, so reading a tree logs only its directories; moved files and the rare name-hash collision are logged too. Ids stay below 2^53 so JavaScript runtimes see exact inode numbers |
+| `nodes.log.cache/` | the names behind derived ids and the hashes of removed ones, by directory (see [memory tiers](#memory-tiers)); a clean stop completes it for the next start, a crash discards it |
 | `mirror.git/` | shallow commits fetched from git upstreams of attached checkouts (see [remote](remote.md#committed-content-from-the-git-upstream)) |
 | `node_id` | this daemon's random id; attach offers carry it so the remote tells this daemon's folders apart from other machines' |
 
@@ -238,20 +239,36 @@ file to the upper as it happens.
 Derived node ids and their directories' cached listings share a third budget,
 `--node-cache` (default 512 MiB; `OVNFS_NODE_CACHE`, user-file `node_cache`).
 The least recently used directory loses its listing, duplicate-name table,
-unlogged leaves and unlogged nodes. Issued names move to a disposable sorted disk
-index. A cold handle keeps its exact
-name even if a later creation has the same hash. After a restart, handles still
-resolve by listing their logged parent, as before. Listing I/O never holds the
+unlogged leaves and unlogged nodes. Issued names move to a sorted disk index,
+beside the hashes of names removed through the export. A cold handle keeps its
+exact name even if a later creation has the same hash, and so does every handle
+across a clean restart, which adopts the index. After a crash, handles issued
+before it resolve by listing their logged parent, so a name that replaced theirs
+behind the export with the same 22-bit hash can take them over. Listing I/O never holds the
 node-table mutex; recovery reads stay resident until their I/O returns and reject
 results read across a directory relocation.
 
 The index lives in an instance directory below `STATE/nodes.log.cache`, on
 its state volume, rather than `$TMPDIR`: system temporary storage may be tmpfs
 and consume RAM, or be removed by temporary-file cleaners during a long run.
-Keep the state directory on a disk-backed filesystem to bound memory use. The
-registry's state lock excludes other daemons before startup moves the previous
-cache tree into `nodes.log.cache.discard/store-*`. A fresh cache never
-reads previous owners. The move does not visit index files; a background worker
+Keep the state directory on a disk-backed filesystem to bound memory use.
+
+A clean close completes the index under the node mutex, then writes the
+manifest `nodes.log.cache/owners`: the identity log's size, the instance, and
+each indexed directory. Directories whose names were only in memory go into one
+`pack-*` file of the instance, with those the adopted pack still holds, rather
+than a file each; directories evicted and changed since have their own file
+rewritten in place. Closing thus writes one file plus the changed evicted
+directories: a million names in 20,000 directories take about 0.1 s on APFS.
+The next open adopts the instance only when the
+manifest matches the replayed log, and removes the manifest durably before
+serving, so a crash discards the index. An adopted index that cannot be read
+counts as missing for its directory, which then resolves by listing as after a
+crash, instead of latching the fault below.
+
+The registry's state lock excludes other daemons before startup moves the rest
+of the store, or all of it without a matching manifest, into
+`nodes.log.cache.discard/store-*`. The move does not visit index files; a background worker
 reclaims detached trees in bounded batches and resumes abandoned cleanup on the
 next start. Close cancels that worker without waiting and leaves its instance
 for the next open. Cleanup errors leave garbage for a later start without
@@ -311,8 +328,8 @@ opens, locks and delegations, and open SMB, FUSE and WinFsp handles retain their
 identities until released, keeping them available to invalidation and recall
 scans. The cold index also supplies the issued paths for removals, renames and
 invalidation, including recursive and temporary creations with colliding names.
-Removed ids remain retired; eviction never reuses their hashes or changes the
-identity log format.
+Removed ids remain retired, across clean restarts through the index; eviction
+never reuses their hashes or changes the identity log format.
 
 The NFS server separately keeps at most 1024 listing snapshots for READDIR
 cookies; eviction from the identity cache does not change those cookies or

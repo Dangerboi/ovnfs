@@ -264,8 +264,9 @@ file. Parsing is strict: unknown keys, a list for `rules`, wrong types and
 invalid predicates fail `new`, `explain` and `plan` with `FILE:LINE: message`,
 e.g. `.o2/ovnfs.yml:3: unknown key "env.imge"`.
 
-The node cache's disposable ownership index lives below `STATE/nodes.log.cache`
-and is reclaimed after a crash when the state lock is next acquired. Keep state
+The node cache's ownership index lives below `STATE/nodes.log.cache`; a clean
+stop completes it for the next start, and it is reclaimed after a crash when the
+state lock is next acquired. Keep state
 on a disk-backed volume, since tmpfs uses RAM. `status` reports index bytes
 separately from estimated resident node-cache bytes. Failed spill writes leave
 existing handles usable and temporarily refuse fresh identity allocation while

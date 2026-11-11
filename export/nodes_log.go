@@ -61,9 +61,10 @@ func openNodeTable(name string, list func(dir string) ([]os.FileInfo, error)) (*
 		return nil, err
 	}
 	// The registry owns the state lock before opening the export. Distinct
-	// logs use distinct stores; no previous instance's owners are trusted.
+	// logs use distinct stores; only an index a clean close completed for
+	// exactly this log is adopted.
 	t.coldParent = name + ".cache"
-	if err = t.openColdStore(); err != nil {
+	if err = t.openColdStore(int64(len(data))); err != nil {
 		t.log.Close()
 		return nil, err
 	}
@@ -383,11 +384,17 @@ func (t *nodeTable) close() error {
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		if t.log != nil {
+			complete := t.completeIndex()
 			if err := durable.Sync(t.log); err != nil && t.logErr == nil {
 				t.logErr = err
 			}
+			info, statErr := t.log.Stat()
 			if err := t.log.Close(); err != nil && t.logErr == nil {
 				t.logErr = err
+			}
+			if complete && statErr == nil && t.logErr == nil {
+				// Without the manifest the next open discards the index.
+				_ = t.saveColdStore(info.Size())
 			}
 		}
 		if t.coldParent == "" && t.coldRoot != "" {

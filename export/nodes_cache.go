@@ -107,7 +107,7 @@ func (t *nodeTable) admitListing(p string) error {
 	return t.cacheErr
 }
 
-// NodeCacheError reports a failure of the disposable identity index.
+// NodeCacheError reports a failure of the identity index.
 func (e *Export) NodeCacheError() string {
 	t := e.fs.nodes
 	t.mu.Lock()
@@ -143,7 +143,7 @@ func (e *Export) NodeCache() api.Usage {
 	return api.Usage{Used: t.cacheUsed, Limit: t.cacheLimit}
 }
 
-// NodeIndexBytes reports the disposable ownership files, separately from RSS.
+// NodeIndexBytes reports the ownership index files, separately from RSS.
 func (e *Export) NodeIndexBytes() int64 {
 	t := e.fs.nodes
 	t.mu.Lock()
