@@ -177,6 +177,9 @@ func (s *Server) compound4(c *call, res *encoder) acceptStat {
 		default:
 			st = x.op(op)
 		}
+		if st != stOpIllegal && st != stBadXDR && (identityError(s.FS) != nil || x.cur.ok && x.cur.id == 0) {
+			st = stIO
+		}
 		res.put32(mark, uint32(st))
 		if st != stOK && !opKeepsBody4(op, st) {
 			res.truncate(mark + 4)

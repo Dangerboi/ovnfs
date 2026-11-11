@@ -118,3 +118,42 @@ func TestRecallsChangesBehindNFSClients(t *testing.T) {
 		t.Fatal("removing the checkout did not recall its handles")
 	}
 }
+
+// TestInvalidationRetiresColdHashes covers path and whole-checkout changes.
+func TestInvalidationRetiresColdHashes(t *testing.T) {
+	for _, whole := range []bool{false, true} {
+		t.Run(map[bool]string{true: "checkout", false: "paths"}[whole], func(t *testing.T) {
+			f := newStack(t, map[string]string{"f998": "old", "pressure/file": "pressure"})
+			f.create(t, "app")
+			nodes := f.export.Nodes()
+			old := nodes.ID("app/f998")
+			f.export.SetNodeCache(0)
+			nodes.ID("app/pressure/file")
+			session, err := f.reg.Enter("app")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = session.FS.Remove("f998")
+			session.Done()
+			if err != nil {
+				t.Fatal(err)
+			}
+			paths := []string{"f998"}
+			if whole {
+				f.export.Invalidate("app", nil, []string{""})
+			}
+			f.export.Invalidate("app", paths, nil)
+			file, err := nodes.Create("app/f4776")
+			if err != nil {
+				t.Fatal(err)
+			}
+			file.Close()
+			if nodes.ID("app/f4776") == old {
+				t.Fatal("replacement reused cold identity")
+			}
+			if _, ok := nodes.Path(old); ok {
+				t.Fatal("retired handle resolves to replacement")
+			}
+		})
+	}
+}

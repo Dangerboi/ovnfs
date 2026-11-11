@@ -153,26 +153,26 @@ func (st *v4State) endGrantLocked(file uint64, g *v4Grant) {
 // other.
 func (st *v4State) active() bool { return st.grants.Load() != 0 || st.delegs.Load() != 0 }
 
-// grant hands client a read delegation of file if it may still have one and
+// grantLocked hands client a read delegation of file if it may still have one and
 // nothing changed the file since beginGrant returned g.
 //
 // The delegation is counted before the grant stops being: active, which
 // reads the counts the other way round, then never sees neither.
-func (st *v4State) grant(client, file uint64, g *v4Grant) (v4StateID, bool) {
-	st.mu.Lock()
-	defer st.unlock()
-	defer st.endGrantLocked(file, g)
+func (st *v4State) grantLocked(client, file uint64, g *v4Grant, identity *v4Identity) (v4StateID, bool, status) {
 	if g.changed {
-		return v4StateID{}, false
+		return v4StateID{}, false, stOK
 	}
 	st.sweepLocked()
 	if !st.mayDelegateLocked(client, file) {
-		return v4StateID{}, false
+		return v4StateID{}, false, stOK
 	}
 	if int(st.delegs.Load()) >= st.maxDelegs {
 		st.recallOldestLocked()
 	}
-	h := st.newHoldLocked(kind4Deleg, v4Owner{client: client}, file)
+	h := st.newHoldLocked(kind4Deleg, v4Owner{client: client}, file, identity)
+	if h == nil {
+		return v4StateID{}, false, stIO
+	}
 	h.granted = st.now()
 	st.fileLocked(file).delegs[client] = h
 	st.delegs.Add(1)
@@ -188,7 +188,7 @@ func (st *v4State) grant(client, file uint64, g *v4Grant) (v4StateID, bool) {
 		clear(st.order[len(live):])
 		st.order = live
 	}
-	return h.advance(), true
+	return h.advance(), true, stOK
 }
 
 // recallOldestLocked recalls the least recently granted delegation that is
@@ -400,23 +400,23 @@ func (x *v4compound) conflictName(dir, name string) (uint64, status) {
 // may have been granted while the change was under way.
 func (x *v4compound) changed(file uint64) { x.s.v4.changed(x.who(), file) }
 
-// delegate grants the client that opened file, at p, a read delegation of
-// it if it opened it for reading only with CLAIM_NULL or CLAIM_DELEGATE_CUR,
-// the backend permits caching it, and the state allows (mayDelegateLocked).
-func (x *v4compound) delegate(client uint64, claim, access uint32, file uint64, p string) (v4StateID, bool) {
+// prepareDelegate begins a possible read delegation before the state lock is
+// taken to install OPEN. Backend.Cacheable must run outside that lock; the
+// open finishes the grant or releases it on every error path.
+func (x *v4compound) prepareDelegate(client uint64, claim, access uint32, file uint64, p string) *v4Grant {
 	if access != share4Read || (claim != claim4Null && claim != claim4DelegateCur) {
-		return v4StateID{}, false
+		return nil
 	}
 	st := &x.s.v4
 	g := st.beginGrant(client, file)
 	if g == nil {
-		return v4StateID{}, false
+		return nil
 	}
 	if !x.s.FS.Cacheable(p) {
 		st.endGrant(file, g)
-		return v4StateID{}, false
+		return nil
 	}
-	return st.grant(client, file, g)
+	return g
 }
 
 // putDeleg4 appends an open_delegation4: none, or a read delegation with

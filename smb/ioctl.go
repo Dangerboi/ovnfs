@@ -145,7 +145,11 @@ func handleIoctl(r *request) ([]byte, uint32) {
 			p := o.path
 			o.mu.Unlock()
 			out = make([]byte, 64)
-			binary.LittleEndian.PutUint64(out, r.c.srv.FS.FileID(p))
+			id := r.c.srv.FS.FileID(p)
+			if id == 0 {
+				return nil, statusInternalError
+			}
+			binary.LittleEndian.PutUint64(out, id)
 			copy(out[8:16], r.c.srv.guid[:8])
 		case ioctlSetSparse:
 			st = statusInvalidDeviceRequest

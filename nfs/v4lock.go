@@ -268,6 +268,11 @@ func lessOwner4(a, b v4Owner) bool {
 // lock acquires or changes a range for a lock owner new to file, under the
 // open it presents, which must be its client's open of file.
 func (st *v4State) lock(open v4StateID, owner v4Owner, file uint64, r v4Range) (v4StateID, *v4Conflict, status) {
+	identity, s := st.acquireIdentity(file)
+	if s != stOK {
+		return v4StateID{}, nil, s
+	}
+	defer identity.drop()
 	st.mu.Lock()
 	defer st.unlock()
 	h, s := st.findLocked(kind4Open, open)
@@ -277,7 +282,7 @@ func (st *v4State) lock(open v4StateID, owner v4Owner, file uint64, r v4Range) (
 	if h.owner.client != owner.client || h.file != file {
 		return v4StateID{}, nil, stBadStateID
 	}
-	return st.lockLocked(owner, file, r)
+	return st.lockLocked(owner, file, r, identity)
 }
 
 // relock acquires or changes a range under a lock owner's stateid of file.
@@ -288,16 +293,21 @@ func (st *v4State) relock(id v4StateID, file uint64, r v4Range) (v4StateID, *v4C
 	if s != stOK {
 		return v4StateID{}, nil, s
 	}
-	return st.lockLocked(h.owner, file, r)
+	return st.lockLocked(h.owner, file, r, nil)
 }
 
 // lockLocked locks r of file for owner and advances the owner's lock state
 // of it, created on its first lock.
-func (st *v4State) lockLocked(owner v4Owner, file uint64, r v4Range) (v4StateID, *v4Conflict, status) {
+func (st *v4State) lockLocked(owner v4Owner, file uint64, r v4Range, identity *v4Identity) (v4StateID, *v4Conflict, status) {
 	if c, s := st.locks.lock(owner, file, r); s != stOK {
 		return v4StateID{}, c, s
 	}
-	return st.ownerHoldLocked(kind4Lock, owner, file).advance(), nil, stOK
+	h := st.ownerHoldLocked(kind4Lock, owner, file, identity)
+	if h == nil {
+		st.locks.releaseOwner(owner)
+		return v4StateID{}, nil, stIO
+	}
+	return h.advance(), nil, stOK
 }
 
 // findLockLocked returns the lock state a stateid names if it is of file.

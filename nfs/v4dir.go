@@ -127,7 +127,11 @@ func (x *v4compound) readdir() status {
 			v4bitmap{}.put(x.e)
 			x.e.u32(0)
 		} else {
-			a := attrsOf(x.s.FS.FileID(v4Join(cur.path, info.Name())), info)
+			id := x.s.FS.FileID(v4Join(cur.path, info.Name()))
+			if id == 0 {
+				return stIO
+			}
+			a := attrsOf(id, info)
 			if s := x.s.putAttrs4(x.e, &a, req, &fs); s != stOK {
 				return s
 			}

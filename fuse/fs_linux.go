@@ -41,13 +41,15 @@ type exportFS struct {
 
 // fileHandle is an open regular file and the node it was opened through.
 type fileHandle struct {
-	ino    uint64
-	file   billy.File
-	append bool
+	release func()
+	ino     uint64
+	file    billy.File
+	append  bool
 }
 
 // dirHandle is an open directory's listing, snapshotted for stable offsets.
 type dirHandle struct {
+	release func()
 	mu      sync.Mutex
 	ino     uint64
 	path    string
@@ -84,8 +86,14 @@ func (x *exportFS) String() string { return "ovnfs" }
 
 // path resolves a kernel node id to its current export path.
 func (x *exportFS) path(ino uint64) (string, gofuse.Status) {
+	if x.nodes.IdentityError() != nil {
+		return "", gofuse.EIO
+	}
 	p, ok := x.nodes.Path(ino)
 	if !ok {
+		if x.nodes.IdentityError() != nil {
+			return "", gofuse.EIO
+		}
 		return "", gofuse.Status(syscall.ESTALE)
 	}
 	return p, gofuse.OK
@@ -107,6 +115,9 @@ func (x *exportFS) entry(p string, out *gofuse.EntryOut) gofuse.Status {
 		return errno(err)
 	}
 	ino := x.nodes.ID(p)
+	if ino == 0 || x.nodes.IdentityError() != nil {
+		return gofuse.EIO
+	}
 	out.NodeId, out.Generation = ino, 0
 	x.fill(&out.Attr, ino, info)
 	out.SetEntryTimeout(TTL)
@@ -220,6 +231,22 @@ func errno(err error) gofuse.Status {
 
 // add registers an open handle and returns its kernel file handle.
 func (x *exportFS) add(h any) uint64 {
+	switch h := h.(type) {
+	case *fileHandle:
+		h.release = x.nodes.HoldFileID(h.ino)
+	case *dirHandle:
+		h.release = x.nodes.HoldFileID(h.ino)
+	}
+	if x.nodes.IdentityError() != nil {
+		switch h := h.(type) {
+		case *fileHandle:
+			h.release()
+			h.file.Close()
+		case *dirHandle:
+			h.release()
+		}
+		return 0
+	}
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	x.next++
@@ -246,9 +273,19 @@ func (x *exportFS) dir(fh uint64) *dirHandle {
 // drop forgets fh and returns what it referred to.
 func (x *exportFS) drop(fh uint64) any {
 	x.mu.Lock()
-	defer x.mu.Unlock()
 	h := x.handles[fh]
 	delete(x.handles, fh)
+	x.mu.Unlock()
+	switch h := h.(type) {
+	case *fileHandle:
+		if h.release != nil {
+			h.release()
+		}
+	case *dirHandle:
+		if h.release != nil {
+			h.release()
+		}
+	}
 	return h
 }
 
@@ -297,8 +334,14 @@ func (x *exportFS) GetAttr(_ <-chan struct{}, in *gofuse.GetAttrIn, out *gofuse.
 
 // attr reports node ino's attributes by name, else through an open file.
 func (x *exportFS) attr(ino, fh uint64, hasFh bool, out *gofuse.AttrOut) gofuse.Status {
+	if x.nodes.IdentityError() != nil {
+		return gofuse.EIO
+	}
 	info, st := x.stat(ino)
 	if !st.Ok() {
+		if x.nodes.IdentityError() != nil {
+			return gofuse.EIO
+		}
 		var f *fileHandle
 		if hasFh {
 			f = x.file(fh)
@@ -389,6 +432,9 @@ func (x *exportFS) SetAttr(_ <-chan struct{}, in *gofuse.SetAttrIn, out *gofuse.
 
 // truncate resizes through the caller's open file when given, else by path.
 func (x *exportFS) truncate(fh uint64, hasFh bool, p string, st gofuse.Status, size int64) error {
+	if err := x.nodes.IdentityError(); err != nil {
+		return err
+	}
 	if hasFh {
 		if f := x.file(fh); f != nil {
 			return f.file.Truncate(size)
@@ -593,6 +639,9 @@ func (x *exportFS) Create(_ <-chan struct{}, in *gofuse.CreateIn, name string, o
 		return st
 	}
 	out.Fh = x.add(&fileHandle{ino: out.NodeId, file: f, append: flags&os.O_APPEND != 0})
+	if out.Fh == 0 {
+		return gofuse.EIO
+	}
 	return gofuse.OK
 }
 
@@ -609,11 +658,17 @@ func (x *exportFS) Open(_ <-chan struct{}, in *gofuse.OpenIn, out *gofuse.OpenOu
 		return errno(err)
 	}
 	out.Fh = x.add(&fileHandle{ino: in.NodeId, file: f, append: flags&os.O_APPEND != 0})
+	if out.Fh == 0 {
+		return gofuse.EIO
+	}
 	return gofuse.OK
 }
 
 // Read reads at the kernel's offset.
 func (x *exportFS) Read(_ <-chan struct{}, in *gofuse.ReadIn, buf []byte) (gofuse.ReadResult, gofuse.Status) {
+	if x.nodes.IdentityError() != nil {
+		return nil, gofuse.EIO
+	}
 	f := x.file(in.Fh)
 	if f == nil {
 		return nil, gofuse.EBADF
@@ -633,6 +688,9 @@ func (x *exportFS) Write(cancel <-chan struct{}, in *gofuse.WriteIn, data []byte
 // Writev writes at the kernel's offset, or at the current end of file for
 // O_APPEND handles, where the kernel's cached size may be stale.
 func (x *exportFS) Writev(_ <-chan struct{}, in *gofuse.WriteIn, data [][]byte) (uint32, gofuse.Status) {
+	if x.nodes.IdentityError() != nil {
+		return 0, gofuse.EIO
+	}
 	f := x.file(in.Fh)
 	if f == nil {
 		return 0, gofuse.EBADF
@@ -668,6 +726,9 @@ func (x *exportFS) Flush(<-chan struct{}, *gofuse.FlushIn) gofuse.Status { retur
 
 // Fsync makes an open file's data durable.
 func (x *exportFS) Fsync(_ <-chan struct{}, in *gofuse.FsyncIn) gofuse.Status {
+	if x.nodes.IdentityError() != nil {
+		return gofuse.EIO
+	}
 	f := x.file(in.Fh)
 	if f == nil {
 		return gofuse.EBADF
@@ -696,6 +757,9 @@ func (x *exportFS) OpenDir(_ <-chan struct{}, in *gofuse.OpenIn, out *gofuse.Ope
 		return errno(err)
 	}
 	out.Fh = x.add(d)
+	if out.Fh == 0 {
+		return gofuse.EIO
+	}
 	return gofuse.OK
 }
 
@@ -709,13 +773,20 @@ func (x *exportFS) list(d *dirHandle) error {
 	if d.path != "" {
 		parent = x.nodes.ID(parentPath(d.path))
 	}
+	if parent == 0 {
+		return syscall.EIO
+	}
 	entries := make([]dirEntry, 0, len(infos)+2)
 	entries = append(entries,
 		dirEntry{name: ".", ino: d.ino, mode: syscall.S_IFDIR},
 		dirEntry{name: "..", ino: parent, mode: syscall.S_IFDIR})
 	for _, info := range infos {
 		p := path.Join(d.path, info.Name())
-		entries = append(entries, dirEntry{name: info.Name(), ino: x.nodes.ID(p), mode: unixMode(info.Mode()), info: info})
+		ino := x.nodes.ID(p)
+		if ino == 0 || x.nodes.IdentityError() != nil {
+			return syscall.EIO
+		}
+		entries = append(entries, dirEntry{name: info.Name(), ino: ino, mode: unixMode(info.Mode()), info: info})
 	}
 	d.entries = entries
 	return nil

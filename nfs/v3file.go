@@ -104,7 +104,11 @@ func (s *Server) lookup3(d *decoder, res *encoder) status {
 	if err != nil {
 		return statusOf(err)
 	}
-	a := attrsOf(s.FS.FileID(child), info)
+	fid := s.FS.FileID(child)
+	if fid == 0 {
+		return stIO
+	}
+	a := attrsOf(fid, info)
 	res.fh(a.fileid)
 	postAttrs3(res, &a)
 	da := attrsOf(id, dir)

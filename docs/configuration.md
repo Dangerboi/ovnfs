@@ -158,6 +158,7 @@ env:
 | `proto` | string | user file only: default file server protocol (`nfs`, `smb`, `fuse`, or `winfsp`) |
 | `memory` | size | user file only: memory budget for written files |
 | `fsync` | boolean | user file only: spill and sync memory-backed files on fsync |
+| `node_cache` | size | user file only: estimated cache budget for derived ids and directory listings (default 512M) |
 | `blob_cache` | size | user file only: memory budget for content-addressed blobs |
 | `atime` | boolean | user file only: allow access time updates |
 | `git_remotes` | boolean | user file only: give a repository a git remote `ovnfs/NAME` per checkout (default true) |
@@ -185,6 +186,7 @@ proto: smb
 memory: 2G
 fsync: true
 blob_cache: 512M
+node_cache: 512M
 atime: false
 git_remotes: true
 ```
@@ -192,7 +194,7 @@ git_remotes: true
 For each setting, the explicit `serve` flag wins over its environment variable,
 which wins over the user file, which wins over the built-in default. The
 environment variables are `OVNFS_MEMORY`, `OVNFS_FSYNC`, `OVNFS_BLOB_CACHE`,
-`OVNFS_ATIME` and `OVNFS_GIT_REMOTES`; `proto` has no environment variable.
+`OVNFS_NODE_CACHE`, `OVNFS_ATIME` and `OVNFS_GIT_REMOTES`; `proto` has no environment variable.
 Serve settings take effect when the daemon starts; restart it after changing
 them.
 
@@ -214,7 +216,7 @@ ovnfs config edit --global
 
 The keys are `rules`, `cache.ROOT.rebuild`, `cache.ROOT.key`, `env.image`,
 `env.setup` and the daemon settings `state`, `mount`, `proto`, `memory`,
-`fsync`, `blob_cache` and `atime`. A cache root may hold dots
+`fsync`, `blob_cache`, `node_cache`, `atime` and `git_remotes`. A cache root may hold dots
 (`cache.web/.next.key`) and matches its entry however it is spelled
 (`cache.web/dist.rebuild` finds `./web/dist`). `rules`, `env.setup` and
 `cache.ROOT.key` take several values, one rule line or item each, and
@@ -261,3 +263,11 @@ source root is the home directory reads `~/.o2/ovnfs.yml` once, as its own
 file. Parsing is strict: unknown keys, a list for `rules`, wrong types and
 invalid predicates fail `new`, `explain` and `plan` with `FILE:LINE: message`,
 e.g. `.o2/ovnfs.yml:3: unknown key "env.imge"`.
+
+The node cache's disposable ownership index lives below `STATE/nodes.log.cache`
+and is reclaimed after a crash when the state lock is next acquired. Keep state
+on a disk-backed volume, since tmpfs uses RAM. `status` reports index bytes
+separately from estimated resident node-cache bytes. Failed spill writes leave
+existing handles usable and temporarily refuse fresh identity allocation while
+resident usage exceeds the budget. Invalidation that frees enough cache resumes
+normal listing admission; an unreadable authoritative index instead fails closed.

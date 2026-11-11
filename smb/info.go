@@ -91,6 +91,13 @@ func queryFileInfo(r *request, o *open, info os.FileInfo, class byte, pending bo
 	var b []byte
 	variable := false
 	fs := r.c.srv.FS
+	var id uint64
+	if class == 6 || class == 18 || class == 59 || class == 100 {
+		id = fs.FileID(o.path)
+		if id == 0 {
+			return nil, false, statusInternalError
+		}
+	}
 	position := func() uint64 {
 		if o.file != nil {
 			n, e := o.file.Seek(0, io.SeekCurrent)
@@ -115,7 +122,7 @@ func queryFileInfo(r *request, o *open, info os.FileInfo, class byte, pending bo
 	case 5:
 		b = appendStandardInfo(nil, info, pending)
 	case 6:
-		b = binary.LittleEndian.AppendUint64(nil, fs.FileID(o.path))
+		b = binary.LittleEndian.AppendUint64(nil, id)
 	case 7:
 		b = make([]byte, 4)
 	case 8:
@@ -137,7 +144,7 @@ func queryFileInfo(r *request, o *open, info os.FileInfo, class byte, pending bo
 	case 18:
 		b = appendBasicInfo(r.c, nil, info)
 		b = appendStandardInfo(b, info, pending)
-		b = binary.LittleEndian.AppendUint64(b, fs.FileID(o.path))
+		b = binary.LittleEndian.AppendUint64(b, id)
 		b = binary.LittleEndian.AppendUint32(b, 0)
 		b = binary.LittleEndian.AppendUint32(b, o.access)
 		b = binary.LittleEndian.AppendUint64(b, position())
@@ -172,13 +179,13 @@ func queryFileInfo(r *request, o *open, info os.FileInfo, class byte, pending bo
 		b = binary.LittleEndian.AppendUint32(b, infoReparseTag(info))
 	case 59:
 		b = binary.LittleEndian.AppendUint64(nil, 1)
-		b = binary.LittleEndian.AppendUint64(b, fs.FileID(o.path))
+		b = binary.LittleEndian.AppendUint64(b, id)
 		b = binary.LittleEndian.AppendUint64(b, 0)
 	case 100:
 		if !r.c.posix {
 			return nil, false, statusInvalidInfoClass
 		}
-		b = appendPosixInfo(nil, o.path, info, fs.FileID(o.path))
+		b = appendPosixInfo(nil, o.path, info, id)
 		variable = true
 	default:
 		return nil, false, statusInvalidInfoClass

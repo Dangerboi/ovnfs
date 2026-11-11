@@ -11,6 +11,25 @@ import (
 	"github.com/go-git/go-billy/v5"
 )
 
+// TestFailedRenameDoesNotLogAncestors keeps failed probes from accumulating
+// logged identities for destination directories which do not exist.
+func TestFailedRenameDoesNotLogAncestors(t *testing.T) {
+	n := newMetadataTestFS(t)
+	f, err := n.Create("source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	n.nodes.id("source")
+	before, next := len(n.nodes.byID), n.nodes.next
+	if err := n.Rename("source", "missing/deep/destination"); !os.IsNotExist(err) {
+		t.Fatalf("rename: %v", err)
+	}
+	if len(n.nodes.byID) != before || n.nodes.next != next {
+		t.Fatal("failed rename logged nonexistent ancestors")
+	}
+}
+
 // TestRenameMetadataByProtocol covers the metadata clients see when a linker
 // replaces its output while keeping the temporary file open. Only NFS needs
 // a synthetic mtime change; SMB and inode-based frontends must preserve it.

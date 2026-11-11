@@ -44,12 +44,13 @@ type fileSystem struct {
 // handle is one open file object. Regular files keep an open export file,
 // read-only unless opened with write access, as the SMB server does.
 type handle struct {
-	mu     sync.RWMutex // guards file and ino against replacement during I/O
-	ino    uint64
-	file   billy.File
-	write  bool
-	append bool // FILE_APPEND_DATA without FILE_WRITE_DATA: every write goes to EOF
-	list   gowinfsp.DirBuffer
+	release func()
+	mu      sync.RWMutex // guards file and ino against replacement during I/O
+	ino     uint64
+	file    billy.File
+	write   bool
+	append  bool // FILE_APPEND_DATA without FILE_WRITE_DATA: every write goes to EOF
+	list    gowinfsp.DirBuffer
 }
 
 // newFileSystem serves nodes with a security descriptor owned by the daemon's user.
@@ -94,6 +95,14 @@ func status(err error) error {
 
 // add registers an open handle and returns its file context.
 func (x *fileSystem) add(h *handle) uintptr {
+	h.release = x.nodes.HoldFileID(h.ino)
+	if x.nodes.IdentityError() != nil {
+		h.release()
+		if h.file != nil {
+			h.file.Close()
+		}
+		return 0
+	}
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	x.next++
@@ -103,6 +112,9 @@ func (x *fileSystem) add(h *handle) uintptr {
 
 // get returns the handle behind file context fc.
 func (x *fileSystem) get(fc uintptr) (*handle, error) {
+	if err := x.nodes.IdentityError(); err != nil {
+		return nil, status(err)
+	}
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	if h := x.handles[fc]; h != nil {
@@ -134,6 +146,9 @@ func fill(out *gowinfsp.FSP_FSCTL_FILE_INFO, ino uint64, info os.FileInfo) {
 // once the name is gone (deleted or replaced while open). The caller holds h.mu.
 func (x *fileSystem) stat(h *handle) (os.FileInfo, error) {
 	p, ok := x.nodes.Path(h.ino)
+	if err := x.nodes.IdentityError(); err != nil {
+		return nil, status(err)
+	}
 	var err error = windows.STATUS_FILE_DELETED
 	if ok {
 		var info os.FileInfo
@@ -141,6 +156,9 @@ func (x *fileSystem) stat(h *handle) (os.FileInfo, error) {
 			return info, nil
 		}
 		err = status(err)
+	}
+	if fault := x.nodes.IdentityError(); fault != nil {
+		return nil, status(fault)
 	}
 	if s, ok := h.file.(interface{ Stat() (os.FileInfo, error) }); ok {
 		info, serr := s.Stat()
@@ -230,13 +248,23 @@ func (x *fileSystem) Create(_ *gowinfsp.FileSystemRef, name string, options, acc
 		h.file, h.write = f, true
 	}
 	h.ino = x.nodes.ID(p)
+	if h.ino == 0 {
+		if h.file != nil {
+			h.file.Close()
+		}
+		return 0, status(syscall.EIO)
+	}
 	if err := x.describe(h, out); err != nil {
 		if h.file != nil {
 			h.file.Close()
 		}
 		return 0, err
 	}
-	return x.add(h), nil
+	fc := x.add(h)
+	if fc == 0 {
+		return 0, status(syscall.EIO)
+	}
+	return fc, nil
 }
 
 // Open opens an existing name. Regular files open read-only unless access
@@ -256,6 +284,9 @@ func (x *fileSystem) Open(_ *gowinfsp.FileSystemRef, name string, options, acces
 		return 0, windows.STATUS_FILE_IS_A_DIRECTORY
 	}
 	h := &handle{ino: x.nodes.ID(p), append: access&writeAccess == windows.FILE_APPEND_DATA}
+	if h.ino == 0 {
+		return 0, status(syscall.EIO)
+	}
 	if info.Mode().IsRegular() {
 		h.write = access&writeAccess != 0
 		flag := os.O_RDONLY
@@ -273,7 +304,11 @@ func (x *fileSystem) Open(_ *gowinfsp.FileSystemRef, name string, options, acces
 		}
 	}
 	fill(out, h.ino, info)
-	return x.add(h), nil
+	fc := x.add(h)
+	if fc == 0 {
+		return 0, status(syscall.EIO)
+	}
+	return fc, nil
 }
 
 // reopenReaders points the read-only handles of w's node at the object w
@@ -381,6 +416,10 @@ func (x *fileSystem) Close(_ *gowinfsp.FileSystemRef, fc uintptr) {
 		h.file = nil
 	}
 	h.list.Delete()
+	if h.release != nil {
+		h.release()
+		h.release = nil
+	}
 }
 
 // Read reads at the driver's offset.
@@ -438,9 +477,12 @@ func (x *fileSystem) Write(_ *gowinfsp.FileSystemRef, fc uintptr, buf []byte, of
 
 // Flush makes a file's data durable; a volume flush (no handle) has nothing to do.
 func (x *fileSystem) Flush(_ *gowinfsp.FileSystemRef, fc uintptr, out *gowinfsp.FSP_FSCTL_FILE_INFO) error {
+	if fc == 0 {
+		return nil
+	}
 	h, err := x.get(fc)
 	if err != nil {
-		return nil
+		return err
 	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -610,14 +652,22 @@ func (x *fileSystem) ReadDirectory(_ *gowinfsp.FileSystemRef, fc uintptr, _ stri
 			if err != nil {
 				return status(err)
 			}
-			fill(&out, x.nodes.ID(d.path), info)
+			ino := x.nodes.ID(d.path)
+			if ino == 0 {
+				return status(syscall.EIO)
+			}
+			fill(&out, ino, info)
 			if more, err := add(d.name, &out); err != nil || !more {
 				return err
 			}
 		}
 	}
 	for _, info := range infos {
-		fill(&out, x.nodes.ID(path.Join(p, info.Name())), info)
+		ino := x.nodes.ID(path.Join(p, info.Name()))
+		if ino == 0 {
+			return status(syscall.EIO)
+		}
+		fill(&out, ino, info)
 		if more, err := add(info.Name(), &out); err != nil || !more {
 			return err
 		}
@@ -699,15 +749,46 @@ func (x *fileSystem) SetReparsePoint(_ *gowinfsp.FileSystemRef, fc uintptr, name
 	case !info.Mode().IsRegular() || info.Size() != 0:
 		return windows.STATUS_INVALID_PARAMETER
 	}
-	// restore puts the placeholder back when the link cannot replace it.
-	restore := func() {
-		if info.IsDir() {
-			_ = x.nodes.MkdirAll(p, info.Mode().Perm())
-		} else {
-			h.file, _ = x.nodes.OpenFile(p, os.O_CREATE|os.O_RDWR, info.Mode().Perm())
-			h.write = h.file != nil
+	// acquire replaces a published handle's identity hold without leaving a
+	// released callback or a closed descriptor for Close to consume again.
+	acquire := func() error {
+		if h.release != nil {
+			h.release()
+			h.release = nil
 		}
 		h.ino = x.nodes.ID(p)
+		if h.ino == 0 {
+			return status(syscall.EIO)
+		}
+		release := x.nodes.HoldFileID(h.ino)
+		if err := x.nodes.IdentityError(); err != nil {
+			release()
+			return status(err)
+		}
+		h.release = release
+		return nil
+	}
+	restore := func() error {
+		if info.IsDir() {
+			if err := x.nodes.MkdirAll(p, info.Mode().Perm()); err != nil {
+				return status(err)
+			}
+		} else {
+			f, err := x.nodes.OpenFile(p, os.O_CREATE|os.O_RDWR, info.Mode().Perm())
+			if err != nil {
+				return status(err)
+			}
+			h.file, h.write = f, true
+		}
+		if err := acquire(); err != nil {
+			if h.file != nil {
+				h.file.Close()
+				h.file = nil
+				h.write = false
+			}
+			return err
+		}
+		return nil
 	}
 	if h.file != nil {
 		if err := h.file.Close(); err != nil {
@@ -716,13 +797,16 @@ func (x *fileSystem) SetReparsePoint(_ *gowinfsp.FileSystemRef, fc uintptr, name
 		h.file, h.write = nil, false
 	}
 	if err := x.nodes.Remove(p); err != nil {
-		restore()
+		if rerr := restore(); rerr != nil {
+			return rerr
+		}
 		return status(err)
 	}
 	if err := x.nodes.Symlink(target, p); err != nil {
-		restore()
+		if rerr := restore(); rerr != nil {
+			return rerr
+		}
 		return status(err)
 	}
-	h.ino = x.nodes.ID(p)
-	return nil
+	return acquire()
 }

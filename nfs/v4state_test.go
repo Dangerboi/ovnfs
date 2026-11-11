@@ -497,3 +497,53 @@ func TestV4RecallIsCheap(t *testing.T) {
 	}
 	st.mu.Unlock()
 }
+
+// holdingFS records the lifecycle of backend identity holds.
+type holdingFS struct {
+	*testFS
+	held map[uint64]int
+}
+
+func (f *holdingFS) HoldFileID(id uint64) func() {
+	f.held[id]++
+	return func() { f.held[id]-- }
+}
+
+// TestV4IdentityHolds pairs every open, lock and delegation with a release,
+// including lease expiry. A backend may evict an identity once none remains.
+func TestV4IdentityHolds(t *testing.T) {
+	clock := &v4clock{}
+	fs := &holdingFS{testFS: newTestFS(t), held: map[uint64]int{}}
+	srv := &Server{FS: fs}
+	srv.v4.now = clock.now
+	srv.start()
+	st := &srv.v4
+	client := v4testClient(t, st, "held")
+	owner := v4Owner{client: client, name: "owner"}
+	id := v4testOpen(t, st, owner, 123)
+	if fs.held[123] != 1 {
+		t.Fatal(fs.held)
+	}
+	if _, s := st.close(id); s != stOK {
+		t.Fatal(s)
+	}
+	if fs.held[123] != 0 {
+		t.Fatal("close leaked hold")
+	}
+	for _, kind := range []v4Kind{kind4Open, kind4Lock, kind4Deleg} {
+		identity, _ := st.acquireIdentity(456)
+		st.mu.Lock()
+		h := st.newHoldLocked(kind, owner, 456, identity)
+		st.dropLocked(h)
+		st.unlock()
+	}
+	if fs.held[456] != 0 {
+		t.Fatal("state drop leaked hold")
+	}
+	v4testOpen(t, st, owner, 789)
+	clock.advance(st.expiry() + time.Second)
+	st.renew(client)
+	if fs.held[789] != 0 {
+		t.Fatal("expired lease leaked hold")
+	}
+}

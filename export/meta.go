@@ -29,12 +29,24 @@ type nodeFS struct {
 // The complete listing also tells the node table which children may take
 // derived ids.
 func (n *nodeFS) ReadDir(name string) ([]os.FileInfo, error) {
+	if err := n.IdentityError(); err != nil {
+		return nil, err
+	}
+	if err := n.nodes.admitListing(overlay.Clean(name)); err != nil {
+		return nil, err
+	}
 	l := n.nodes.startListing(overlay.Clean(name))
+	if err := n.IdentityError(); err != nil {
+		return nil, err
+	}
 	infos, err := n.Filesystem.ReadDir(name)
 	if err != nil {
 		return nil, err
 	}
 	n.nodes.observe(l, infos)
+	if err := n.IdentityError(); err != nil {
+		return nil, err
+	}
 	out := infos[:0]
 	for _, info := range infos {
 		if !overlay.AppleDouble(info.Name()) {
@@ -46,11 +58,22 @@ func (n *nodeFS) ReadDir(name string) ([]os.FileInfo, error) {
 
 // Lstat describes name without following it; see [link] for symlinks.
 func (n *nodeFS) Lstat(name string) (os.FileInfo, error) {
+	if err := n.IdentityError(); err != nil {
+		return nil, err
+	}
 	info, err := n.Filesystem.Lstat(name)
 	if err != nil {
 		return nil, err
 	}
 	return n.linked(name, info), nil
+}
+
+// Stat preserves the index fault instead of presenting it as an absent name.
+func (n *nodeFS) Stat(name string) (os.FileInfo, error) {
+	if err := n.IdentityError(); err != nil {
+		return nil, err
+	}
+	return n.Filesystem.Stat(name)
 }
 
 // linked returns a symlink's info as a [link]; other infos pass through.
@@ -82,7 +105,18 @@ func (l *link) LinksToDir() bool {
 }
 
 // Link forwards hard links without coupling the protocol to the router type.
-func (n *nodeFS) Link(oldname, newname string) error {
+func (n *nodeFS) Link(oldname, newname string) (err error) {
+	release, err := n.nodes.guard(false, overlay.Clean(newname))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		release()
+		if fault := n.IdentityError(); fault != nil {
+			err = fault
+		}
+	}()
+
 	n.recall(oldname) // its link count changes
 	fs, ok := n.Filesystem.(interface{ Link(string, string) error })
 	if !ok {
@@ -96,7 +130,18 @@ func (n *nodeFS) Link(oldname, newname string) error {
 }
 
 // Mknod creates a special node and records its node id.
-func (n *nodeFS) Mknod(name string, mode os.FileMode) error {
+func (n *nodeFS) Mknod(name string, mode os.FileMode) (err error) {
+	release, err := n.nodes.guard(false, overlay.Clean(name))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		release()
+		if fault := n.IdentityError(); fault != nil {
+			err = fault
+		}
+	}()
+
 	fs, ok := n.Filesystem.(interface {
 		Mknod(string, os.FileMode) error
 	})
@@ -111,7 +156,18 @@ func (n *nodeFS) Mknod(name string, mode os.FileMode) error {
 }
 
 // MkdirAll creates a directory and notes the new entry for node ids.
-func (n *nodeFS) MkdirAll(name string, perm os.FileMode) error {
+func (n *nodeFS) MkdirAll(name string, perm os.FileMode) (err error) {
+	release, err := n.nodes.guard(false, overlay.Clean(name))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		release()
+		if fault := n.IdentityError(); fault != nil {
+			err = fault
+		}
+	}()
+
 	if err := n.Filesystem.MkdirAll(name, perm); err != nil {
 		return err
 	}
@@ -120,7 +176,18 @@ func (n *nodeFS) MkdirAll(name string, perm os.FileMode) error {
 }
 
 // Symlink creates a symbolic link and notes the new entry for node ids.
-func (n *nodeFS) Symlink(target, link string) error {
+func (n *nodeFS) Symlink(target, link string) (err error) {
+	release, err := n.nodes.guard(false, overlay.Clean(link))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		release()
+		if fault := n.IdentityError(); fault != nil {
+			err = fault
+		}
+	}()
+
 	if err := n.Filesystem.Symlink(target, link); err != nil {
 		return err
 	}
@@ -129,8 +196,23 @@ func (n *nodeFS) Symlink(target, link string) error {
 }
 
 // TempFile creates a uniquely named file and notes the new entry for node ids.
-func (n *nodeFS) TempFile(dir, prefix string) (billy.File, error) {
-	f, err := n.Filesystem.TempFile(dir, prefix)
+func (n *nodeFS) TempFile(dir, prefix string) (f billy.File, err error) {
+	release, err := n.nodes.guard(true, overlay.Clean(dir))
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		release()
+		if fault := n.IdentityError(); fault != nil {
+			if f != nil {
+				f.Close()
+				f = nil
+			}
+			err = fault
+		}
+	}()
+
+	f, err = n.Filesystem.TempFile(dir, prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +221,31 @@ func (n *nodeFS) TempFile(dir, prefix string) (billy.File, error) {
 }
 
 // Rename moves a node without changing its id or those of its descendants.
-func (n *nodeFS) Rename(from, to string) error {
+func (n *nodeFS) Rename(from, to string) (err error) {
+	// Do not log nonexistent destination ancestors for a rename which cannot
+	// reach its backend commit. Preparation may pin real directory identities.
+	if _, err := n.Filesystem.Lstat(from); err != nil {
+		return err
+	}
+	dir, _ := split(overlay.Clean(to))
+	parent, err := n.Filesystem.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if !parent.IsDir() {
+		return syscall.ENOTDIR
+	}
+	release, err := n.nodes.prepareRename(overlay.Clean(from), overlay.Clean(to))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		release()
+		if fault := n.IdentityError(); fault != nil {
+			err = fault
+		}
+	}()
+
 	n.recall(from, to)
 	if err := n.Filesystem.Rename(from, to); err != nil {
 		return err
@@ -153,9 +259,20 @@ func (n *nodeFS) Rename(from, to string) error {
 }
 
 // Remove retires a deleted node and tolerates hidden sidecars in empty dirs.
-func (n *nodeFS) Remove(name string) error {
+func (n *nodeFS) Remove(name string) (err error) {
+	release, err := n.nodes.guard(false, overlay.Clean(name))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		release()
+		if fault := n.IdentityError(); fault != nil {
+			err = fault
+		}
+	}()
+
 	n.recall(name)
-	err := n.Filesystem.Remove(name)
+	err = n.Filesystem.Remove(name)
 	if errors.Is(err, syscall.ENOTEMPTY) && n.dropAppleDouble(name) {
 		err = n.Filesystem.Remove(name)
 	}

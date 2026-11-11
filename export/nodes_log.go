@@ -60,6 +60,13 @@ func openNodeTable(name string, list func(dir string) ([]os.FileInfo, error)) (*
 	if err != nil {
 		return nil, err
 	}
+	// The registry owns the state lock before opening the export. Distinct
+	// logs use distinct stores; no previous instance's owners are trusted.
+	t.coldParent = name + ".cache"
+	if err = t.openColdStore(); err != nil {
+		t.log.Close()
+		return nil, err
+	}
 	t.stop = make(chan struct{})
 	t.done = make(chan struct{})
 	go t.syncLoop()
@@ -366,6 +373,9 @@ func (t *nodeTable) syncLoop() {
 // close stops the flush worker and makes every appended operation durable.
 func (t *nodeTable) close() error {
 	t.closeOnce.Do(func() {
+		if t.coldStop != nil {
+			close(t.coldStop) // reclamation never delays the next daemon
+		}
 		if t.stop != nil {
 			close(t.stop)
 			<-t.done
@@ -380,6 +390,12 @@ func (t *nodeTable) close() error {
 				t.logErr = err
 			}
 		}
+		if t.coldParent == "" && t.coldRoot != "" {
+			// Tables without a log own a private temporary store, not state.
+			go os.RemoveAll(t.coldRoot)
+		}
+		// State-backed indexes stay in place until the next open detaches
+		// them. Neither deletion nor its completion holds up close.
 	})
-	return t.logErr
+	return errors.Join(t.logErr, t.cacheErr)
 }

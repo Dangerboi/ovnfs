@@ -26,3 +26,12 @@ type Backend interface {
 	// Statfs reports the capacity FSSTAT and the NFSv4 space attributes show.
 	Statfs() (smb.Statfs, error)
 }
+
+// identityError lets a backend fail closed when stable identities cannot be
+// read. Backends without a separate identity store need no hook.
+func identityError(fs Backend) error {
+	if fs, ok := fs.(interface{ IdentityError() error }); ok {
+		return fs.IdentityError()
+	}
+	return nil
+}

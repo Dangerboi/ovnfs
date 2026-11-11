@@ -805,6 +805,11 @@ func finishCreate(r *request, a createArgs, info os.FileInfo, epoch uint64) ([]b
 			return nil, statusDirectoryNotEmpty
 		}
 	}
+	nodeID := fs.FileID(a.name)
+	if nodeID == 0 {
+		closeImplicit(o)
+		return nil, statusInternalError
+	}
 	g := &r.c.srv.st.opens
 	var leaseFlags uint32
 	a.leaseEpoch, leaseFlags = g.grantCaching(r.c, o, a)
@@ -872,7 +877,7 @@ func finishCreate(r *request, a createArgs, info os.FileInfo, epoch uint64) ([]b
 			contexts = append(contexts, createContext{"MxAc", d})
 		case "QFid":
 			d := make([]byte, 32)
-			binary.LittleEndian.PutUint64(d, fs.FileID(a.name))
+			binary.LittleEndian.PutUint64(d, nodeID)
 			copy(d[8:16], r.c.srv.guid[:8])
 			contexts = append(contexts, createContext{"QFid", d})
 		case "RqLs":
@@ -890,7 +895,7 @@ func finishCreate(r *request, a createArgs, info os.FileInfo, epoch uint64) ([]b
 			}
 		case posixCreateTag:
 			if a.posix {
-				d := appendPosixInfo(nil, a.name, info, fs.FileID(a.name))
+				d := appendPosixInfo(nil, a.name, info, nodeID)
 				contexts = append(contexts, createContext{posixCreateTag, d[68:]})
 			}
 		case "AAPL":
@@ -985,7 +990,30 @@ func getOpenID(src []byte) fileID {
 func publishOpen(r *request, o *open) bool {
 	var once sync.Once
 	c := r.c
-	o.closeFn = func() { once.Do(func() { closeOpen(c, o) }) }
+	var release func()
+	if fs, ok := c.srv.FS.(interface{ HoldFileID(uint64) func() }); ok && o.pipe == nil {
+		id := c.srv.FS.FileID(o.path)
+		if id == 0 {
+			c.srv.st.opens.dropCaching(o)
+			closeImplicit(o)
+			return false
+		}
+		release = fs.HoldFileID(id)
+		if fs, ok := c.srv.FS.(interface{ IdentityError() error }); ok && fs.IdentityError() != nil {
+			release()
+			c.srv.st.opens.dropCaching(o)
+			closeImplicit(o)
+			return false
+		}
+	}
+	o.closeFn = func() {
+		once.Do(func() {
+			closeOpen(c, o)
+			if release != nil {
+				release()
+			}
+		})
+	}
 	t := r.tree
 	t.mu.Lock()
 	if t.closed {

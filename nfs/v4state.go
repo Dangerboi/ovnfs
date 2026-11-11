@@ -105,7 +105,8 @@ type v4State struct {
 	order     []*v4Hold
 	locks     v4Locks
 	// closing are the files to close once the lock is released (unlock).
-	closing []billy.File
+	closing   []billy.File
+	releasing []func()
 }
 
 // v4Client is a client id the server has handed out: its SETCLIENTID
@@ -188,10 +189,11 @@ type v4OwnerKey struct {
 
 // v4Hold is the state behind one stateid.
 type v4Hold struct {
-	kind  v4Kind
-	owner v4Owner
-	file  uint64
-	id    v4StateID
+	release func()
+	kind    v4Kind
+	owner   v4Owner
+	file    uint64
+	id      v4StateID
 	// access is an open's share access bits.
 	access uint32
 	// granted and recalled are when a delegation was handed out and when
@@ -231,7 +233,12 @@ func (f *v4File) writers() int {
 func (st *v4State) unlock() {
 	closing := st.closing
 	st.closing = nil
+	releasing := st.releasing
+	st.releasing = nil
 	st.mu.Unlock()
+	for _, release := range releasing {
+		release()
+	}
 	for _, f := range closing {
 		_ = f.Close()
 	}
@@ -458,6 +465,10 @@ func (st *v4State) dropClientLocked(client uint64) {
 
 // dropLocked forgets a state.
 func (st *v4State) dropLocked(h *v4Hold) {
+	if h.release != nil {
+		st.releasing = append(st.releasing, h.release)
+		h.release = nil
+	}
 	delete(st.holds, h.id.other)
 	st.unindexLocked(h)
 	key := v4OwnerKey{h.kind, h.owner}
@@ -501,9 +512,36 @@ func (st *v4State) fileLocked(id uint64) *v4File {
 	return f
 }
 
-// newHoldLocked makes a state with a fresh stateid at generation 0.
-func (st *v4State) newHoldLocked(kind v4Kind, owner v4Owner, file uint64) *v4Hold {
-	h := &v4Hold{kind: kind, owner: owner, file: file}
+// v4Identity is acquired without the state lock. Publication consumes the
+// hold; unused or failed preparations are released after the transaction.
+type v4Identity struct{ release func() }
+
+func (i *v4Identity) drop() {
+	if i != nil && i.release != nil {
+		i.release()
+		i.release = nil
+	}
+}
+
+func (st *v4State) acquireIdentity(file uint64) (*v4Identity, status) {
+	i := &v4Identity{}
+	if fs, ok := st.srv.FS.(interface{ HoldFileID(uint64) func() }); ok {
+		i.release = fs.HoldFileID(file)
+	}
+	if identityError(st.srv.FS) != nil {
+		i.drop()
+		return nil, stIO
+	}
+	return i, stOK
+}
+
+// newHoldLocked publishes a prepared identity with a fresh stateid.
+func (st *v4State) newHoldLocked(kind v4Kind, owner v4Owner, file uint64, identity *v4Identity) *v4Hold {
+	if identity == nil {
+		return nil
+	}
+	h := &v4Hold{kind: kind, owner: owner, file: file, release: identity.release}
+	identity.release = nil
 	st.counter++
 	binary.BigEndian.PutUint32(h.id.other[0:4], st.boot)
 	binary.BigEndian.PutUint64(h.id.other[4:12], st.counter)
@@ -512,12 +550,15 @@ func (st *v4State) newHoldLocked(kind v4Kind, owner v4Owner, file uint64) *v4Hol
 }
 
 // ownerHoldLocked returns owner's open or lock state of file, creating it.
-func (st *v4State) ownerHoldLocked(kind v4Kind, owner v4Owner, file uint64) *v4Hold {
+func (st *v4State) ownerHoldLocked(kind v4Kind, owner v4Owner, file uint64, identity *v4Identity) *v4Hold {
 	key := v4OwnerKey{kind, owner}
 	if h := st.owners[key][file]; h != nil {
 		return h
 	}
-	h := st.newHoldLocked(kind, owner, file)
+	h := st.newHoldLocked(kind, owner, file, identity)
+	if h == nil {
+		return nil
+	}
 	if st.owners[key] == nil {
 		st.owners[key] = make(map[uint64]*v4Hold)
 	}
@@ -579,17 +620,60 @@ func (st *v4State) checkIO(id v4StateID, file uint64, write bool) (uint64, *v4Ke
 // open records an OPEN of file by owner for share access, which adds to
 // what the owner opened it for.
 func (st *v4State) open(owner v4Owner, file uint64, access uint32) (v4StateID, status) {
+	id, _, _, s := st.openDelegated(owner, file, access, nil)
+	return id, s
+}
+
+// openDelegated publishes the open and delegation together. A failed second
+// acquisition restores an existing owner's access and stateid under the same
+// lock, or drops a new open, before any concurrent operation can use it.
+func (st *v4State) openDelegated(owner v4Owner, file uint64, access uint32, g *v4Grant) (v4StateID, v4StateID, bool, status) {
+	if g != nil {
+		defer st.endGrant(file, g)
+	}
+	identity, s := st.acquireIdentity(file)
+	if s != stOK {
+		return v4StateID{}, v4StateID{}, false, s
+	}
+	defer identity.drop()
+	var delegation *v4Identity
+	if g != nil {
+		delegation, s = st.acquireIdentity(file)
+		if s != stOK {
+			return v4StateID{}, v4StateID{}, false, s
+		}
+		defer delegation.drop()
+	}
 	st.mu.Lock()
 	defer st.unlock()
+	// Lease, owner and grant eligibility are checked again after index I/O.
 	if s := st.checkClientLocked(owner.client); s != stOK {
-		return v4StateID{}, s
+		return v4StateID{}, v4StateID{}, false, s
 	}
-	h := st.ownerHoldLocked(kind4Open, owner, file)
+	h := st.ownerHoldLocked(kind4Open, owner, file, identity)
+	if h == nil {
+		return v4StateID{}, v4StateID{}, false, stIO
+	}
+	previous, previousAccess := h.id, h.access
 	if h.access == 0 {
 		st.fileLocked(file).opens[h] = struct{}{}
 	}
 	h.access |= access
-	return h.advance(), stOK
+	var did v4StateID
+	var delegated bool
+	if g != nil {
+		var s status
+		did, delegated, s = st.grantLocked(owner.client, file, g, delegation)
+		if s != stOK {
+			if previousAccess == 0 {
+				st.dropLocked(h)
+			} else {
+				h.id, h.access = previous, previousAccess
+			}
+			return v4StateID{}, v4StateID{}, false, s
+		}
+	}
+	return h.advance(), did, delegated, stOK
 }
 
 // updateOpen advances an open for OPEN_CONFIRM or OPEN_DOWNGRADE, which

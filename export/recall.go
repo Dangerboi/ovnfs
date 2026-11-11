@@ -45,8 +45,29 @@ func (n *nodeFS) OpenFile(name string, flag int, perm os.FileMode) (billy.File, 
 }
 
 // openFile opens name and notes an entry O_CREATE may have made for node ids.
-func (n *nodeFS) openFile(name string, flag int, perm os.FileMode) (billy.File, error) {
-	f, err := n.Filesystem.OpenFile(name, flag, perm)
+func (n *nodeFS) openFile(name string, flag int, perm os.FileMode) (f billy.File, err error) {
+	if err := n.IdentityError(); err != nil {
+		return nil, err
+	}
+	if flag&os.O_CREATE != 0 {
+		var release func()
+		release, err = n.nodes.guard(false, overlay.Clean(name))
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			release()
+			if fault := n.IdentityError(); fault != nil {
+				if f != nil {
+					f.Close()
+					f = nil
+				}
+				err = fault
+			}
+		}()
+	}
+
+	f, err = n.Filesystem.OpenFile(name, flag, perm)
 	if err == nil && flag&os.O_CREATE != 0 {
 		n.nodes.created(overlay.Clean(name))
 	}

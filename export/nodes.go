@@ -1,10 +1,13 @@
 package export
 
 import (
+	"container/list"
 	"os"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // Node ids come in two kinds. Counter ids, below derivedBit, are allocated
@@ -51,23 +54,45 @@ const (
 // server. Logged ids and namespace changes of logged nodes are appended to
 // the identity log.
 type nodeTable struct {
-	mu        sync.Mutex
-	root      *node
-	byID      map[uint64]*node
-	byKey     map[uint64]*node // logged nodes
-	next      uint64           // next counter id or key
-	list      func(dir string) ([]os.FileInfo, error)
-	pending   []byte // records of the current operation, written by flush
-	log       *os.File
-	logErr    error
-	dirty     bool
-	stop      chan struct{}
-	done      chan struct{}
-	closeOnce sync.Once
+	mu           sync.Mutex
+	indexIO      func() // optional I/O barrier for deterministic fault/latency checks
+	indexWait    func() // optional wait barrier
+	cacheLimit   int64
+	cacheUsed    int64
+	cacheLRU     list.List
+	coldInit     bool
+	coldRoot     string
+	coldParent   string
+	coldStop     chan struct{}
+	reclaimIO    func() // optional reclamation barrier
+	coldBytes    int64
+	coldGarbage  []coldGarbage
+	recoveryKey  uint64 // recent consecutive cold-handle misses
+	recoveryHash uint32
+	recoveryRun  uint8
+	spillErr     error
+	spillRetry   time.Time
+	spillBackoff time.Duration
+	cacheErr     error
+	fault        atomic.Pointer[nodeCacheFault]
+	root         *node
+	byID         map[uint64]*node
+	byKey        map[uint64]*node // logged nodes
+	next         uint64           // next counter id or key
+	list         func(dir string) ([]os.FileInfo, error)
+	pending      []byte // records of the current operation, written by flush
+	log          *os.File
+	logErr       error
+	dirty        bool
+	stop         chan struct{}
+	done         chan struct{}
+	closeOnce    sync.Once
 }
 
 // node links an identity to its current parent and basename.
 type node struct {
+	holds  int    // live protocol state, protected by the table mutex
+	moves  uint64 // changes on each relocation, including moves back to the same path
 	id     uint64
 	key    uint64 // 0 while the node is unlogged (derived, never recorded)
 	name   string
@@ -81,7 +106,16 @@ type node struct {
 type dirState struct {
 	// gen advances whenever entries may have appeared or the listing was
 	// dropped; a listing read across a change is not installed.
-	gen uint64
+	gen        uint64
+	version    uint64         // cache/ownership changes during an index replacement
+	indexing   *coldOperation // one index operation per directory
+	cold       bool
+	coldLoaded bool  // all disk owners are resident until the next eviction
+	coldBytes  int64 // size of the directory index on disk
+	coldDirty  bool  // newly issued names not yet present in the disposable index
+	reading    int
+	cached     int64 // estimated bytes of listing, leaves and unlogged children
+	recent     *list.Element
 	// entries maps each name hash of the latest listing, plus names created
 	// through the export since, to its name, or to ambiguous when several
 	// entries share it. nil until listed.
@@ -110,19 +144,56 @@ const (
 func newNodeTable(list func(dir string) ([]os.FileInfo, error)) *nodeTable {
 	root := &node{id: 1, key: 1}
 	return &nodeTable{
-		root:  root,
-		byID:  map[uint64]*node{root.id: root},
-		byKey: map[uint64]*node{root.key: root},
-		next:  root.id + 1,
-		list:  list,
+		root:       root,
+		byID:       map[uint64]*node{root.id: root},
+		byKey:      map[uint64]*node{root.key: root},
+		next:       root.id + 1,
+		list:       list,
+		cacheLimit: DefaultNodeCache,
 	}
 }
 
 // id returns p's id, allocating ids for p and its ancestors on first use.
-func (t *nodeTable) id(p string) uint64 {
+func (t *nodeTable) id(p string) (id uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	defer func() {
+		t.trimCache()
+		if t.cacheErr != nil {
+			id = 0
+		}
+	}()
 	defer t.flush()
+	if t.cacheErr != nil {
+		return 0
+	}
+	// Stop admitting new identities while a failed spill prevents reclamation.
+	// Existing resident and cold owners remain usable; retry only after backoff.
+	if t.spillErr != nil {
+		t.trimCache()
+		if t.spillErr != nil && t.cacheUsed > t.cacheLimit {
+			if n := t.find(p); n != nil {
+				return n.id
+			}
+			if id, ok := t.leafID(p); ok {
+				return id
+			}
+			if id, ok := t.issuedID(p, false); ok {
+				return id
+			}
+			return 0
+		}
+	}
+	// Existing names need only their issued owner, even when the rest of the
+	// directory is cold. New allocations still recover all competing owners.
+	if id, ok := t.issuedID(p, true); ok {
+		return id
+	}
+	release, err := t.recoverPaths(p)
+	defer release()
+	if err != nil {
+		return 0
+	}
 	var listed *node
 	for try := 0; ; try++ {
 		id, unlisted := t.ensure(p, listed, try < 3)
@@ -140,10 +211,14 @@ func (t *nodeTable) id(p string) uint64 {
 func (t *nodeTable) lookup(p string) (uint64, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	defer t.trimCache()
 	if n := t.find(p); n != nil {
 		return n.id, true
 	}
-	return t.leafID(p)
+	if id, ok := t.leafID(p); ok {
+		return id, true
+	}
+	return t.issuedID(p, false)
 }
 
 // leafID returns p's id if p is a leaf.
@@ -163,37 +238,94 @@ func (t *nodeTable) leafID(p string) (uint64, bool) {
 func (t *nodeTable) subtree(p string) []uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	n := t.find(p)
-	if n == nil {
-		if id, ok := t.leafID(p); ok {
-			return []uint64{id}
+	defer t.trimCache()
+	for {
+		n := t.find(p)
+		if n == nil {
+			if id, ok := t.leafID(p); ok {
+				return []uint64{id}
+			}
+			if id, ok := t.issuedID(p, false); ok {
+				return []uint64{id}
+			}
+			return nil
 		}
-		return nil
-	}
-	var out []uint64
-	var walk func(*node)
-	walk = func(n *node) {
-		out = append(out, n.id)
-		for _, k := range n.kids {
-			walk(k)
+		type snapshot struct {
+			n            *node
+			s            *dirState
+			gen, version uint64
+			location     []nodePosition
 		}
-		if s := n.dir; s != nil {
-			for h := range s.leaves {
-				out = append(out, derivedID(n.key, h))
+		var dirs []snapshot
+		var out []uint64
+		var walk func(*node)
+		walk = func(n *node) {
+			out = append(out, n.id)
+			for _, k := range n.kids {
+				walk(k)
+			}
+			if s := n.dir; s != nil {
+				s.reading++
+				dirs = append(dirs, snapshot{n, s, s.gen, s.version, nodeLocation(n)})
+				for h := range s.leaves {
+					out = append(out, derivedID(n.key, h))
+				}
 			}
 		}
+		walk(n)
+		valid := true
+		for _, old := range dirs {
+			if !old.s.cold || old.s.coldLoaded {
+				continue
+			}
+			names, ok := t.readOwners(old.n)
+			if !ok {
+				valid = false
+				break
+			}
+			for h := range names {
+				if !t.takenExceptCold(old.n, h) {
+					out = append(out, derivedID(old.n.key, h))
+				}
+			}
+		}
+		for _, old := range dirs {
+			old.s.reading--
+			if t.byID[old.n.id] != old.n || old.s.gen != old.gen || old.s.version != old.version || !sameLocation(old.n, old.location) {
+				valid = false
+			}
+		}
+		if t.find(p) != n {
+			valid = false
+		}
+		if t.cacheErr != nil {
+			return nil
+		}
+		if valid {
+			return out
+		}
 	}
-	walk(n)
-	return out
 }
 
 // path returns the current path components of id, or false if the id is
 // unknown (never issued, removed, or replaced by a rename). A derived id
 // issued before a restart is resolved through its parent directory.
-func (t *nodeTable) path(id uint64) ([]string, bool) {
+func (t *nodeTable) path(id uint64) (parts []string, ok bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	defer func() {
+		t.trimCache()
+		if t.cacheErr != nil {
+			parts, ok = nil, false
+		}
+	}()
+	if t.cacheErr != nil {
+		return nil, false
+	}
 	if n := t.byID[id]; n != nil {
+		if n.key == 0 {
+			t.touch(n.parent)
+		}
 		return n.components(0), true
 	}
 	d, name := t.resolve(id)
@@ -224,7 +356,13 @@ func (n *node) components(extra int) []string {
 func (t *nodeTable) rename(from, to string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	defer t.trimCache()
 	defer t.flush()
+	release, err := t.recoverPaths(from, to)
+	defer release()
+	if err != nil {
+		return
+	}
 	if from == to {
 		return
 	}
@@ -234,10 +372,17 @@ func (t *nodeTable) rename(from, to string) {
 	}
 	dir, name := split(to)
 	d := t.dirNode(dir)
+	if d == nil {
+		return
+	}
 	if dst := t.child(d, name); dst != src {
 		t.drop(dst)
 	}
 	if src != nil {
+		src.moves++
+		if src.key == 0 && src.holds == 0 {
+			t.charge(src.parent, -int64(160+len(src.name)))
+		}
 		delete(src.parent.kids, src.name)
 		src.name, src.parent = strings.Clone(name), d
 		t.link(d, src)
@@ -255,8 +400,34 @@ func (t *nodeTable) rename(from, to string) {
 func (t *nodeTable) remove(p string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	defer t.trimCache()
 	defer t.flush()
-	t.drop(t.node(p))
+	// Logged directories can retire their whole key without reading any child
+	// index. A cold leaf needs only its exact transient owner, not admission.
+	if n := t.find(p); n != nil {
+		t.drop(n)
+		return
+	}
+	if n := t.node(p); n != nil {
+		t.drop(n)
+		return
+	}
+	id, ok := t.issuedID(p, false)
+	if !ok {
+		return
+	}
+	if n := t.node(p); n != nil {
+		t.drop(n)
+		return
+	}
+	dir, name := split(p)
+	d := t.find(dir)
+	if d == nil {
+		return
+	}
+	n := &node{id: id, parent: d, name: strings.Clone(name)}
+	t.link(d, n)
+	t.drop(n)
 }
 
 // created notes a directory entry made through the export at p, keeping the
@@ -266,18 +437,50 @@ func (t *nodeTable) remove(p string) {
 func (t *nodeTable) created(p string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	defer t.trimCache()
 	defer t.flush()
+	release, err := t.recoverPaths(p)
+	defer release()
+	if err != nil {
+		return
+	}
 	dir, name := split(p)
 	if d := t.find(dir); d != nil && d.kids[name] == nil && !d.leaf(name) {
-		t.appeared(d, name)
+		if t.child(d, name) == nil {
+			t.appeared(d, name)
+		}
 	}
 }
 
 // listing identifies a directory read in progress: the node and the
 // generation its listing must still have when the entries arrive.
 type listing struct {
-	dir *node
-	gen uint64
+	dir      *node
+	gen      uint64
+	location []nodePosition
+}
+
+type nodePosition struct {
+	n     *node
+	moves uint64
+}
+
+func nodeLocation(n *node) []nodePosition {
+	var out []nodePosition
+	for ; n != nil; n = n.parent {
+		out = append(out, nodePosition{n, n.moves})
+	}
+	return out
+}
+
+func sameLocation(n *node, location []nodePosition) bool {
+	for _, old := range location {
+		if n != old.n || n.moves != old.moves {
+			return false
+		}
+		n = n.parent
+	}
+	return n == nil
 }
 
 // startListing is called before a directory read whose entries observe
@@ -285,11 +488,18 @@ type listing struct {
 func (t *nodeTable) startListing(dir string) listing {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	defer t.trimCache()
+	release, err := t.recoverPaths(dir)
+	defer release()
+	if err != nil {
+		return listing{}
+	}
 	n := t.node(dir)
 	if n == nil {
 		return listing{}
 	}
-	return listing{dir: n, gen: n.state().gen}
+	t.touch(n)
+	return listing{dir: n, gen: n.state().gen, location: nodeLocation(n)}
 }
 
 // observe installs the entries a directory read returned, letting the
@@ -300,6 +510,10 @@ func (t *nodeTable) observe(l listing, infos []os.FileInfo) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	defer t.trimCache()
+	if !sameLocation(l.dir, l.location) {
+		return
+	}
 	t.install(l.dir, l.gen, infos)
 }
 
@@ -312,6 +526,7 @@ func (t *nodeTable) unlist(p string, deep bool) {
 	walk = func(n *node) {
 		if s := n.dir; s != nil {
 			s.gen++
+			t.charge(n, -s.listBytes())
 			s.entries, s.dups = nil, nil
 		}
 		if deep {
@@ -329,25 +544,45 @@ func (t *nodeTable) unlist(p string, deep bool) {
 // that must be listed before p's derived id can be decided. A directory just
 // listed, or derive false, falls back to a counter id instead.
 func (t *nodeTable) ensure(p string, listed *node, derive bool) (id uint64, unlisted *node) {
+	release, err := t.recoverPaths(p)
+	defer release()
+	if err != nil {
+		return 0, nil
+	}
+
+	if t.cacheErr != nil {
+		return 0, nil
+	}
 	if p == "" {
 		return t.root.id, nil
 	}
 	dir, name := split(p)
 	d := t.dirNode(dir)
+	if d == nil {
+		return 0, nil
+	}
+	t.touch(d)
 	if k := d.kids[name]; k != nil {
 		return k.id, nil
 	}
 	if d.leaf(name) {
 		return derivedID(d.key, nameHash(name)), nil
 	}
+	if t.spillErr != nil && t.cacheUsed > t.cacheLimit {
+		return 0, nil
+	}
 	if derive {
 		switch id, kept, how := t.derive(d, name); {
 		case how == useDerived:
-			d.addLeaf(kept)
+			d.state().coldDirty = true
+			t.addLeaf(d, kept)
 			return id, nil
 		case how == needListing && d != listed:
 			return 0, d
 		}
+	}
+	if t.cacheErr != nil {
+		return 0, nil
 	}
 	return t.alloc(d, name).id, nil
 }
@@ -390,6 +625,10 @@ func (t *nodeTable) derive(d *node, name string) (uint64, string, derivation) {
 // taken reports whether derived id hash h of keyed directory d is held by a
 // node or leaf, or retired.
 func (t *nodeTable) taken(d *node, h uint32) bool {
+	return t.takenExceptCold(d, h)
+}
+
+func (t *nodeTable) takenExceptCold(d *node, h uint32) bool {
 	if t.byID[derivedID(d.key, h)] != nil {
 		return true
 	}
@@ -412,7 +651,10 @@ func (t *nodeTable) resolve(id uint64) (*node, string) {
 	}
 	key, h := id>>hashBits&(maxDerivingKey-1), uint32(id&(1<<hashBits-1))
 	fresh := false
-	for range 4 {
+	for tries := 0; tries < 4; {
+		if n := t.byID[id]; n != nil {
+			return n.parent, n.name
+		}
 		d := t.byKey[key]
 		if d == nil {
 			return nil, ""
@@ -421,17 +663,70 @@ func (t *nodeTable) resolve(id uint64) (*node, string) {
 			if _, gone := s.retired[h]; gone {
 				return nil, ""
 			}
+			if s.cold && t.cacheErr != nil {
+				return nil, ""
+			}
 			if name, ok := s.leaves[h]; ok {
+				t.touch(d)
 				return d, name
 			}
+			if s.cold && !s.coldLoaded {
+				// A leaf costs 64 bytes plus its name, versus 16 plus its name on
+				// disk. Only batch a handle recovery when all owners fit without
+				// evicting another directory, or consecutive distinct misses indicate
+				// a rewalk. Listings and mutation guards still
+				// recover the complete set even at zero budget.
+				if t.batchRecovery(d, h) {
+					if !t.loadCold(d) && t.cacheErr != nil {
+						return nil, ""
+					}
+					continue
+				}
+				name, valid := t.readOwner(d, h)
+				if n := t.byID[id]; n != nil {
+					return n.parent, n.name
+				}
+				if !valid {
+					if t.cacheErr != nil {
+						return nil, ""
+					}
+					continue
+				}
+				// Ownership can change while the read is unlocked. Prefer the live
+				// owner, and never revive a retired hash or replace another node.
+				if _, gone := s.retired[h]; gone {
+					return nil, ""
+				}
+				if current, ok := s.leaves[h]; ok {
+					t.touch(d)
+					return d, current
+				}
+				if name != "" {
+					if !t.takenExceptCold(d, h) {
+						if t.spillErr == nil {
+							t.addLeaf(d, name)
+						}
+						return d, name
+					}
+					return nil, ""
+				}
+				if t.spillErr != nil {
+					return nil, ""
+				}
+				// This process may not have recovered every pre-restart handle.
+				// An absent index record still needs ordinary listing resolution.
+
+			}
 			if name, ok := s.candidate(d, h); ok {
-				d.addLeaf(name)
+				s.coldDirty = true
+				t.addLeaf(d, name)
 				return d, name
 			}
 		}
 		if fresh {
 			return nil, ""
 		}
+		tries++
 		installed, err := t.relist(d)
 		if err != nil {
 			return nil, ""
@@ -466,11 +761,21 @@ func (s *dirState) candidate(d *node, h uint32) (string, bool) {
 // relist reads d again with the mutex released and installs the entries
 // unless d changed meanwhile.
 func (t *nodeTable) relist(d *node) (bool, error) {
-	gen := d.state().gen
+	s := d.state()
+	gen := s.gen
+	s.reading++
 	dir := t.nodePath(d)
+	location := nodeLocation(d)
 	t.mu.Unlock()
 	infos, err := t.list(dir)
 	t.mu.Lock()
+	s.reading--
+	if !sameLocation(d, location) {
+		return false, nil
+	}
+	if t.nodePath(d) != dir {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
@@ -483,6 +788,14 @@ func (t *nodeTable) install(d *node, gen uint64, infos []os.FileInfo) bool {
 	if t.byID[d.id] != d || s == nil || s.gen != gen {
 		return false
 	}
+	if t.spillErr != nil {
+		return false
+	}
+	location := nodeLocation(d)
+	if !t.loadCold(d) || t.byID[d.id] != d || s.gen != gen || !sameLocation(d, location) {
+		return false
+	}
+	t.charge(d, -s.listBytes())
 	s.entries, s.dups = make(map[uint32]string, len(infos)), nil
 	for _, info := range infos {
 		// A FileInfo's name may slice the whole path it was statted by.
@@ -502,6 +815,7 @@ func (t *nodeTable) install(d *node, gen uint64, infos []os.FileInfo) bool {
 		}
 		s.dups[h] = append(s.dups[h], name)
 	}
+	t.charge(d, s.listBytes())
 	return true
 }
 
@@ -515,9 +829,12 @@ func (t *nodeTable) appeared(d *node, name string) {
 			switch v, ok := s.entries[h]; {
 			case !ok:
 				s.entries[h] = strings.Clone(name)
+				t.charge(d, int64(64+len(name)))
 			case v == name, v == ambiguous && slices.Contains(s.dups[h], name):
 			default:
 				s.entries[h] = ambiguous
+				t.charge(d, int64(len(ambiguous)-len(v)))
+				t.charge(d, -s.dupBytes(h))
 				delete(s.dups, h)
 			}
 		}
@@ -538,6 +855,9 @@ func (t *nodeTable) dirNode(p string) *node {
 		var name string
 		name, rest, _ = strings.Cut(rest, "/")
 		k := t.child(n, name)
+		if k == nil && t.cacheErr != nil {
+			return nil
+		}
 		switch {
 		case k == nil:
 			k = t.alloc(n, name)
@@ -561,6 +881,9 @@ func (t *nodeTable) alloc(d *node, name string) *node {
 
 // pin logs an unlogged node under its derived id and gives it a key.
 func (t *nodeTable) pin(k *node) {
+	if k.holds == 0 {
+		t.charge(k.parent, -int64(160+len(k.name)))
+	}
 	k.key = t.next
 	t.next++
 	t.byKey[k.key] = k
@@ -574,6 +897,9 @@ func (t *nodeTable) link(d, k *node) {
 	}
 	d.kids[k.name] = k
 	t.byID[k.id] = k
+	if k.key == 0 && k.holds == 0 {
+		t.charge(d, int64(160+len(k.name)))
+	}
 }
 
 // leaf reports whether name is one of n's leaves.
@@ -586,10 +912,13 @@ func (n *node) leaf(name string) bool {
 }
 
 // addLeaf holds name as a leaf of the keyed directory n.
-func (n *node) addLeaf(name string) {
+func (t *nodeTable) addLeaf(n *node, name string) {
 	s := n.state()
 	if s.leaves == nil {
 		s.leaves = make(map[uint32]string)
+	}
+	if _, ok := s.leaves[nameHash(name)]; !ok {
+		t.charge(n, int64(64+len(name)))
 	}
 	s.leaves[nameHash(name)] = name
 }
@@ -602,9 +931,14 @@ func (t *nodeTable) child(d *node, name string) *node {
 	if !d.leaf(name) {
 		return nil
 	}
+
 	h := nameHash(name)
 	k := &node{id: derivedID(d.key, h), name: d.dir.leaves[h], parent: d}
+	t.charge(d, -int64(64+len(k.name)))
 	delete(d.dir.leaves, h)
+	if len(d.dir.leaves) == 0 {
+		d.dir.leaves = nil
+	}
 	t.link(d, k)
 	return k
 }
@@ -663,9 +997,16 @@ func (t *nodeTable) drop(n *node) {
 	if n.key != 0 {
 		t.recordRemove(n)
 	}
+	if n.key == 0 && n.holds == 0 {
+		t.charge(n.parent, -int64(160+len(n.name)))
+	}
 	delete(n.parent.kids, n.name)
 	var forget, retire func(*node)
 	forget = func(n *node) {
+		t.uncache(n)
+		if s := n.dir; s != nil && (s.cold || s.indexing != nil) && t.coldRoot != "" {
+			t.coldGarbage = append(t.coldGarbage, coldGarbage{t.coldPath(n), n})
+		}
 		delete(t.byID, n.id)
 		if n.key != 0 {
 			delete(t.byKey, n.key)

@@ -78,3 +78,40 @@ the clone and the daemon's state share its volume. `BUILD` (default
 run BUILD without cross-tree caches such as sccache, which would hide the
 filesystem's effect. `bench.sh --clean REPO` removes `BENCH_DIR` and its
 worktree.
+
+## Node cache stress test
+
+`scripts/stress-nodes.py` starts a private Linux daemon and source repository,
+opens many checkouts, checks every file's contents and size during repeated
+walks, runs `git status`, and samples daemon RSS and `profile heap`. It never
+uses an existing state directory or mount. Build the binary first, then run
+with root for the kernel NFS mount (FUSE also works without root):
+
+```sh
+go build -o bin/ovnfs .
+sudo python3 scripts/stress-nodes.py --binary bin/ovnfs --proto nfs --output /tmp/node-stress
+```
+
+Defaults are 24 checkouts, 400 directories of 128 files in each of `src` and
+`node_modules` (2,457,600 paths total), at least three complete walks and ten
+minutes. `--node-cache 4K --workers 4 --mutate --restart` adds concurrent
+rename/remove/create operations and a restart while a separate process holds
+cwd and a file descriptor; use `--restart` with NFS only. `--proto fuse`
+exercises the FUSE frontend. A race-enabled binary checks the same workload
+under the race detector. Use the same script with a main-branch binary for a
+baseline; old binaries ignore `OVNFS_NODE_CACHE`.
+
+The NFS restart probe also retains opaque wire handles for a moved file and a
+held directory whose ancestor moves; GETATTR and READ after restart use those
+exact bytes through a fresh TCP connection. The mounted cwd/fd checks remain.
+The concurrent cold-mutation tests in `nfs` and `fuse` verify eviction before
+mutating files, empty directories, ancestors, removed/recreated names and known
+hash collisions against a generation-consistent listing oracle. The upstream
+FUSE held-fd rename/content failure is a separate probe, excluded from this
+phase. `OVNFS_LATENCY=1 go test ./export ./nfs -run Latency -v` reports wide
+directory rewalks and concurrent unrelated lookup latency.
+
+RSS is sampled once a second; index bytes come from the periodic status/heap
+snapshots, avoiding a filesystem-wide index scan on each sample. The output
+directory contains RSS and index-byte samples, heap profiles, status snapshots,
+daemon/holder logs and `results.json` with timings, throughput and errors.

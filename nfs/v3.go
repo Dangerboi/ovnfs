@@ -98,6 +98,9 @@ func (s *Server) nfs3(c *call, res *encoder) acceptStat {
 	at := res.len()
 	res.u32(uint32(stOK))
 	st := p.run(s, &c.args, res)
+	if identityError(s.FS) != nil {
+		st = stIO
+	}
 	if c.args.err != nil {
 		return rpcGarbageArgs
 	}

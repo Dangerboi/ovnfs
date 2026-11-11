@@ -31,7 +31,11 @@ func (e *Export) protocolFS() protocolFS {
 }
 
 // FileID returns the stable node id that NFS handles and SMB file ids carry.
+// Zero reports an identity fault or refused allocation and must not be published.
 func (s *protocolFS) FileID(p string) uint64 { return s.nodes.id(overlay.Clean(p)) }
+
+// HoldFileID keeps a live protocol identity available to invalidation scans.
+func (s *protocolFS) HoldFileID(id uint64) func() { return s.nodes.retain(id) }
 
 // Cacheable permits leases and delegations only when backend changes can
 // recall cached contents (see checkout.Registry.Tracked).

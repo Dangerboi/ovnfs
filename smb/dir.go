@@ -134,7 +134,11 @@ func handleQueryDirectory(r *request) ([]byte, uint32) {
 		oldLength := len(data)
 		start := (oldLength + 7) &^ 7
 		data = append(data, make([]byte, start-oldLength)...)
-		data = appendDirectoryEntry(r.c, data, class, e, info, uint32(next+1), r.c.srv.FS.FileID(e.path))
+		id := r.c.srv.FS.FileID(e.path)
+		if id == 0 {
+			return nil, statusInternalError
+		}
+		data = appendDirectoryEntry(r.c, data, class, e, info, uint32(next+1), id)
 		if class == 37 && r.c.appleReadDir.Load() {
 			if info.Mode()&os.ModeSymlink == 0 {
 				binary.LittleEndian.PutUint32(data[start+64:], accessAll)

@@ -425,7 +425,12 @@ func (cmd *statusCmd) Run(c *cli) error {
 		{"bases", commas(int64(st.Bases))},
 		{"layers", commas(int64(st.Layers))},
 		{"memory", usage(st.Memory, "off: writes go to disk")},
+		{"node cache", usage(st.NodeCache, "current directory")},
+		{"node index", humanBytes(st.NodeIndexBytes)},
 		{"blob cache", usage(st.BlobCache, "off")},
+	}
+	if st.NodeCacheError != "" {
+		rows = append(rows, [2]string{"node cache error", st.NodeCacheError})
 	}
 	for _, row := range rows {
 		fmt.Fprintf(stdout, "%s%s%s\n", paint(stdout, styleDim, row[0]), strings.Repeat(" ", max(2, 12-len(row[0]))), row[1])

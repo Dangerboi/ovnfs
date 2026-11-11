@@ -583,3 +583,76 @@ func TestSpecialNodes(t *testing.T) {
 		}
 	}
 }
+
+// TestIndexFaultBlocksTruncate exercises a writable kernel handle: neither
+// truncate's descriptor path nor fstat's fallback may hide an identity error.
+func TestIndexFaultBlocksTruncate(t *testing.T) {
+	f := newFixture(t, map[string]string{"d/file": "unchanged", "pressure/file": "pressure"})
+	held, err := os.OpenFile(f.path("alpha/d/file"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	nodes := f.export.Nodes()
+	f.export.SetNodeCache(0)
+	nodes.ID("alpha/pressure/file")
+	nodes.ID("beta/d/file")
+	nodes.ID("beta/pressure/file")
+	files, err := filepath.Glob(filepath.Join(f.state, "nodes.log.cache", "instance-*", "*", "*"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("cold indexes: %v %v", files, err)
+	}
+	for _, name := range files {
+		if err := os.Remove(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if nodes.ID("beta/d/file") != 0 || nodes.IdentityError() == nil {
+		t.Fatal("missing cold index did not latch a fault")
+	}
+	wantErrno(t, "ftruncate after index fault", held.Truncate(1), syscall.EIO)
+	session, err := f.reg.Enter("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := session.FS.Lstat("d/file")
+	session.Done()
+	if err != nil || info.Size() != int64(len("unchanged")) {
+		t.Fatalf("failed truncate changed file size: %v %v", info, err)
+	}
+	time.Sleep(TTL + 100*time.Millisecond) // let the kernel's earlier attrs expire
+	if _, err := held.Stat(); !errors.Is(err, syscall.EIO) {
+		t.Fatalf("fstat hid index fault: %v", err)
+	}
+}
+
+func TestSlowReleaseDoesNotHoldHandleMutex(t *testing.T) {
+	entered, resume := make(chan struct{}), make(chan struct{})
+	h := &fileHandle{release: func() { close(entered); <-resume }}
+	other := &fileHandle{}
+	x := &exportFS{handles: map[uint64]any{1: h, 2: other}}
+	done := make(chan struct{})
+	go func() { x.drop(1); close(done) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("release did not start")
+	}
+	found := make(chan *fileHandle, 1)
+	go func() { found <- x.file(2) }()
+	select {
+	case got := <-found:
+		if got != other {
+			t.Error("lost unrelated handle")
+		}
+	case <-time.After(time.Second):
+		close(resume)
+		t.Fatal("release held handle mutex")
+	}
+	close(resume)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("drop did not finish")
+	}
+}

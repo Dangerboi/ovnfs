@@ -49,23 +49,27 @@ type Rule struct {
 
 // Status describes the running daemon.
 type Status struct {
-	Version   int     `json:"version"`
-	PID       int     `json:"pid"`
-	Uptime    float64 `json:"uptime_s"`
-	Proto     string  `json:"proto"`
-	Port      int     `json:"port"`
-	Mount     string  `json:"mount"`
-	State     string  `json:"state"`
-	Socket    string  `json:"socket"` // admin socket clients dial for these operations
-	Checkouts int     `json:"checkouts"`
-	Snapshots int     `json:"snapshots"`
-	Bases     int     `json:"bases"`
-	Layers    int     `json:"layers"`
-	Memory    Usage   `json:"memory"`     // checkouts' written files held in memory before they spill to disk
-	BlobCache Usage   `json:"blob_cache"` // content-addressed blobs served from memory
+	Version        int     `json:"version"`
+	PID            int     `json:"pid"`
+	Uptime         float64 `json:"uptime_s"`
+	Proto          string  `json:"proto"`
+	Port           int     `json:"port"`
+	Mount          string  `json:"mount"`
+	State          string  `json:"state"`
+	Socket         string  `json:"socket"` // admin socket clients dial for these operations
+	Checkouts      int     `json:"checkouts"`
+	Snapshots      int     `json:"snapshots"`
+	Bases          int     `json:"bases"`
+	Layers         int     `json:"layers"`
+	Memory         Usage   `json:"memory"` // checkouts' written files held in memory before they spill to disk
+	NodeIndexBytes int64   `json:"node_index_bytes"`
+	NodeCacheError string  `json:"node_cache_error,omitempty"`
+	NodeCache      Usage   `json:"node_cache"` // estimated reconstructible node and listing bytes
+	BlobCache      Usage   `json:"blob_cache"` // content-addressed blobs served from memory
 }
 
-// Usage is resident bytes against a limit; a zero Limit means the tier is off.
+// Usage is resident bytes against a limit. A zero Limit disables file/blob
+// caching; the node cache still keeps the current directory.
 type Usage struct {
 	Used  int64 `json:"used"`
 	Limit int64 `json:"limit"`

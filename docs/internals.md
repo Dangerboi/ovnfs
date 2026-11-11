@@ -235,7 +235,89 @@ Small store blobs (at most 1 MiB) are served from a second budget
 crash or `kill -9` loses the files still in memory; `--memory 0` writes every
 file to the upper as it happens.
 
-Node ids are outside both budgets: the daemon keeps every path it has handed
-out until it is removed, a file as a name in its directory's table rather than
-a full node, about 150 bytes per path. A restart drops the unlogged ids, which
-resolve again by listing their directory when a client presents them.
+Derived node ids and their directories' cached listings share a third budget,
+`--node-cache` (default 512 MiB; `OVNFS_NODE_CACHE`, user-file `node_cache`).
+The least recently used directory loses its listing, duplicate-name table,
+unlogged leaves and unlogged nodes. Issued names move to a disposable sorted disk
+index. A cold handle keeps its exact
+name even if a later creation has the same hash. After a restart, handles still
+resolve by listing their logged parent, as before. Listing I/O never holds the
+node-table mutex; recovery reads stay resident until their I/O returns and reject
+results read across a directory relocation.
+
+The index lives in an instance directory below `STATE/nodes.log.cache`, on
+its state volume, rather than `$TMPDIR`: system temporary storage may be tmpfs
+and consume RAM, or be removed by temporary-file cleaners during a long run.
+Keep the state directory on a disk-backed filesystem to bound memory use. The
+registry's state lock excludes other daemons before startup moves the previous
+cache tree into `nodes.log.cache.discard/store-*`. A fresh cache never
+reads previous owners. The move does not visit index files; a background worker
+reclaims detached trees in bounded batches and resumes abandoned cleanup on the
+next start. Close cancels that worker without waiting and leaves its instance
+for the next open. Cleanup errors leave garbage for a later start without
+faulting live owners. Independent logs have independent cache and discard trees.
+Owner files are sharded into 256 directories by the low eight bits of the
+logged directory key, so consecutive keys spread evenly. Each file and its
+replacement temporary file stay in the same shard; no index file stays open
+between operations. These files hold names only, never file contents, and are
+not part of the identity log. Status reports only the current instance's bytes
+as `node index`
+(`node_index_bytes` in JSON), separately from the resident estimate and RSS.
+Rewalks restore one directory's issued owners with one index read, accounted
+against the same budget. Retained handles and already-issued names batch when
+the owners fit the remaining budget; under pressure they binary-search a single
+owner and admit only that name, avoiding repeated reconstruction of wide cold
+directories. Consecutive distinct misses in one directory promote recovery to a
+batch even under pressure, so handle and name rewalks still amortize index I/O.
+Index reads and replacement writes release the node mutex, retain operation
+state and revalidate the
+namespace generation, ownership version and ancestor locations before eviction.
+NFSv4 prepares identity holds before its state transaction and releases them
+after unlocking; slow index I/O does not hold the global protocol state lock.
+
+The 512 MiB default accommodates a few million paths (about 138 estimated bytes
+per path in the mounted fixture), including multi-checkout working sets that
+would repeatedly overflow 64 MiB. It still bounds reconstructible state far
+below the several GiB an unbounded walk can retain; smaller machines can lower
+it with the same knob. It does not bound total daemon RSS.
+
+The budget estimates map, node and name bytes, rather than measuring the Go
+heap. The current directory stays cached even when it exceeds the budget, so
+identifying a large READDIR's entries does not reread the directory for every
+entry. Retained reconstructible state is at most the budget or one directory,
+whichever is larger; zero keeps just that directory. Concurrent recovery reads
+temporarily retain their directories. `ovnfs status` reports the estimate and
+budget as `node cache` (`node_cache` in JSON). Failed spill writes leave the
+old index and resident ownership intact, report a degraded `node_cache_error`,
+and retry on subsequent operations with exponential backoff (100 ms to 30 s).
+While reclamation is blocked above the budget, new identities, mutations
+requiring fresh ownership and uncached listings are refused per operation. Existing handles and
+open writable descriptors can still resolve, read, write, sync and close. A
+successful retry, or invalidation that frees enough resident cache, reopens
+normal listing admission without logging every newly observed file. The budget may stay above its limit by the
+already resident directory and in-flight work, but failed writes do not permit
+new walks to grow ownership indefinitely.
+
+Namespace mutations preflight affected cold owners and keep them resident until
+bookkeeping finishes. An unreadable authoritative index rejects the mutation
+before changing the backend and latches an identity fault: allocation and cold
+promotion stop and protocols report I/O errors, including faults discovered by
+an operation's final trim or hold acquisition. Restart clears this fatal fault.
+A failed optional spill write never sets the fatal latch.
+
+Logged identities, retirement records and live protocol state are outside this
+budget. Nodes with children are logged; empty directories can be evicted. NFSv4
+opens, locks and delegations, and open SMB, FUSE and WinFsp handles retain their
+identities until released, keeping them available to invalidation and recall
+scans. The cold index also supplies the issued paths for removals, renames and
+invalidation, including recursive and temporary creations with colliding names.
+Removed ids remain retired; eviction never reuses their hashes or changes the
+identity log format.
+
+The NFS server separately keeps at most 1024 listing snapshots for READDIR
+cookies; eviction from the identity cache does not change those cookies or
+verifiers. Its kept writable files expire when idle. NFSv4 state follows client
+leases and explicit close/unlock/delegation return. The overlay's `pathIDs` and
+`aliases` describe current upper files, are removed with those files, and do
+not accumulate paths from read-only walks. These limits do not bound the
+registry's live captures, upper indexes or logged directory identities.

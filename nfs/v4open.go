@@ -201,6 +201,13 @@ func (x *v4compound) open() status {
 	}
 
 	var kept billy.File
+	// Until st.keep owns a retained creation descriptor, every error path
+	// (including identity refusal after the backend commit) must close it.
+	defer func() {
+		if kept != nil {
+			kept.Close()
+		}
+	}()
 	var set v4bitmap
 	if create {
 		unlock := st.dirs.lock(parent.id, parent.id)
@@ -218,17 +225,21 @@ func (x *v4compound) open() status {
 
 	x.setCurrent(p)
 	id := x.cur.id
+	if id == 0 {
+		return stIO
+	}
 	if exists && (write || create) {
 		x.changed(id)
 	}
-	sid, s := st.open(owner, id, access&share4AccessAll)
-	if kept != nil {
-		st.keep(id, kept)
-	}
+	g := x.prepareDelegate(owner.client, claim, access, id, p)
+	sid, did, delegated, s := st.openDelegated(owner, id, access&share4AccessAll, g)
 	if s != stOK {
 		return s
 	}
-	did, delegated := x.delegate(owner.client, claim, access, id, p)
+	if kept != nil {
+		st.keep(id, kept)
+		kept = nil
+	}
 	putStateID4(x.e, sid)
 	cinfo.put(x.e)
 	x.e.u32(open4LocktypePosix)

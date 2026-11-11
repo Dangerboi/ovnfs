@@ -68,6 +68,9 @@ func (s *Server) list3(d *decoder, res *encoder, plus bool) status {
 	if fits && cookie <= 1 {
 		up := parentOf(p)
 		upID := s.FS.FileID(up)
+		if upID == 0 {
+			return stIO
+		}
 		var a *attrs
 		if plus {
 			if pa, err := s.stat(upID, up); err == nil {
@@ -80,6 +83,10 @@ func (s *Server) list3(d *decoder, res *encoder, plus bool) status {
 		info := l.entries[i]
 		child := path.Join(p, info.Name())
 		c := l.first + uint64(i)
+		childID := s.FS.FileID(child)
+		if childID == 0 {
+			return stIO
+		}
 		if plus {
 			// A continuation's listing may be older than the client's
 			// cached attributes, which it would replace: describe the
@@ -91,10 +98,10 @@ func (s *Server) list3(d *decoder, res *encoder, plus bool) status {
 				}
 				info = fresh
 			}
-			a := attrsOf(s.FS.FileID(child), info)
+			a := attrsOf(childID, info)
 			fits = r.add(info.Name(), c, a.fileid, &a)
 		} else {
-			fits = r.add(info.Name(), c, s.FS.FileID(child), nil)
+			fits = r.add(info.Name(), c, childID, nil)
 		}
 	}
 	if !fits && r.n == 0 {

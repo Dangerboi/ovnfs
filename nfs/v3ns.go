@@ -34,15 +34,19 @@ func (s *Server) dir3(id uint64, ok bool, name string, dot status) (string, os.F
 	return p, info, stOK
 }
 
-// created3 appends the result of a CREATE, MKDIR or SYMLINK of p in dir: the
+// created3 appends the result of a CREATE, MKDIR, SYMLINK or MKNOD of p in dir: the
 // new handle, its attributes and the directory's wcc_data (without pre-op
 // attributes, which could not be read atomically with the change).
-func (s *Server) created3(res *encoder, dir, p string) {
+func (s *Server) created3(res *encoder, dir, p string) status {
 	fid := s.FS.FileID(p)
+	if fid == 0 {
+		return stIO
+	}
 	res.bool(true)
 	res.fh(fid)
 	s.postOp3(res, fid, p)
 	s.wcc3(res, nil, s.FS.FileID(dir), dir)
+	return stOK
 }
 
 // createhow3 modes.
@@ -103,6 +107,10 @@ func (s *Server) create3(d *decoder, res *encoder) status {
 		return statusOf(err)
 	}
 	fid := s.FS.FileID(p)
+	if fid == 0 {
+		f.Close()
+		return stIO
+	}
 	if how == createExclusive {
 		s.v3.verfs.put(fid, verf)
 	}
@@ -114,8 +122,7 @@ func (s *Server) create3(d *decoder, res *encoder) status {
 	if st := s.apply3(p, &sa); st != stOK {
 		return st
 	}
-	s.created3(res, dir, p)
-	return stOK
+	return s.created3(res, dir, p)
 }
 
 // exists3 answers a CREATE of p, which exists as info: EXIST for GUARDED,
@@ -139,8 +146,7 @@ func (s *Server) exists3(res *encoder, dir, p string, info os.FileInfo, how uint
 			return st
 		}
 	}
-	s.created3(res, dir, p)
-	return stOK
+	return s.created3(res, dir, p)
 }
 
 // createVerfs remembers the verifiers of recent EXCLUSIVE creates by file
@@ -203,8 +209,7 @@ func (s *Server) mkdir3(d *decoder, res *encoder) status {
 	if st := s.apply3(p, &sa); st != stOK {
 		return st
 	}
-	s.created3(res, dir, p)
-	return stOK
+	return s.created3(res, dir, p)
 }
 
 // symlink3 answers SYMLINK (section 3.3.10). A dangling link is an existing
@@ -231,8 +236,7 @@ func (s *Server) symlink3(d *decoder, res *encoder) status {
 	if st := s.apply3(p, &sa); st != stOK {
 		return st
 	}
-	s.created3(res, dir, p)
-	return stOK
+	return s.created3(res, dir, p)
 }
 
 // mknod3 creates sockets and FIFOs; device nodes remain unsupported.
@@ -286,8 +290,7 @@ func (s *Server) mknod3(d *decoder, res *encoder) status {
 	if st := s.apply3(p, &sa); st != stOK {
 		return st
 	}
-	s.created3(res, dir, p)
-	return stOK
+	return s.created3(res, dir, p)
 }
 
 // remove3 answers REMOVE (section 3.3.12).
@@ -330,6 +333,9 @@ func (s *Server) unlink3(d *decoder, res *encoder, isDir bool) status {
 		}
 	}
 	fid := s.FS.FileID(p)
+	if fid == 0 {
+		return stIO
+	}
 	s.Recall(fid)
 	err = s.FS.Remove(p)
 	s.Recall(fid)

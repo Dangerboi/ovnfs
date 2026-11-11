@@ -569,7 +569,17 @@ func (c *conn) dispatch(r *request) *wireResponse {
 	if status == statusPending && r.asyncStarted {
 		return r.pendingReply
 	}
+	body, status = r.identityReply(body, status)
 	return c.response(r, body, status, 0, false)
+}
+
+// identityReply applies equally to synchronous and resumed asynchronous calls:
+// no successful reply may expose an unusable backend identity.
+func (r *request) identityReply(body []byte, status uint32) ([]byte, uint32) {
+	if fs, ok := r.c.srv.FS.(interface{ IdentityError() error }); ok && r.tree != nil && r.hdr.Command != cmdClose && fs.IdentityError() != nil {
+		return nil, statusInternalError
+	}
+	return body, status
 }
 
 // consumeCredits charges large I/O in 64-KiB units before it reaches the backend.
@@ -810,6 +820,7 @@ func (r *request) complete(a *asyncOp, body []byte, status uint32) {
 	}
 	delete(r.c.operations, a.id)
 	r.c.mu.Unlock()
+	body, status = r.identityReply(body, status)
 	response := r.c.response(r, body, status, a.id, true)
 	_ = r.c.sendResponses([]*wireResponse{response})
 }

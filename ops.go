@@ -19,12 +19,15 @@ const protocolVersion = 5
 
 // opsHandler binds admin operations to one checkout registry.
 type opsHandler struct {
-	reg     *checkout.Registry
-	shares  *shares
-	links   *links
-	welcome admin.Welcome
-	started time.Time
-	stop    func(context.Context, api.StopArgs) error // unmounts as asked, then has the server exit
+	nodeIndexBytes func() int64
+	nodeCache      func() api.Usage
+	nodeCacheError func() string
+	reg            *checkout.Registry
+	shares         *shares
+	links          *links
+	welcome        admin.Welcome
+	started        time.Time
+	stop           func(context.Context, api.StopArgs) error // unmounts as asked, then has the server exit
 }
 
 // decodeArgs rejects malformed or unknown request fields.
@@ -64,6 +67,15 @@ func (h *opsHandler) Call(ctx context.Context, op string, raw json.RawMessage) (
 		return dispatch(ctx, raw, func(context.Context, struct{}) (api.Status, error) {
 			s := api.Status{Version: protocolVersion, PID: os.Getpid(), Uptime: time.Since(h.started).Seconds(), Proto: h.welcome.Proto, Port: h.welcome.Port, Mount: h.welcome.Mount, State: h.welcome.State, Socket: socketPath(h.welcome.State)}
 			h.reg.Counts(&s)
+			if h.nodeCache != nil {
+				s.NodeCache = h.nodeCache()
+				if h.nodeIndexBytes != nil {
+					s.NodeIndexBytes = h.nodeIndexBytes()
+				}
+				if h.nodeCacheError != nil {
+					s.NodeCacheError = h.nodeCacheError()
+				}
+			}
 			return s, nil
 		})
 	case "ls":

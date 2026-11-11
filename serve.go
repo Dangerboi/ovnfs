@@ -95,6 +95,7 @@ func serveDefaults(conf manifest.Daemon) kong.Option {
 		"default_proto":       cmp.Or(conf.Proto, defaultProto()),
 		"memory_default":      cmp.Or(os.Getenv("OVNFS_MEMORY"), conf.Memory, "1G"),
 		"fsync_default":       cmp.Or(os.Getenv("OVNFS_FSYNC"), conf.Fsync, "false"),
+		"node_cache_default":  cmp.Or(os.Getenv("OVNFS_NODE_CACHE"), conf.NodeCache, "512M"),
 		"blob_cache_default":  cmp.Or(os.Getenv("OVNFS_BLOB_CACHE"), conf.BlobCache, "512M"),
 		"atime_default":       cmp.Or(os.Getenv("OVNFS_ATIME"), conf.Atime, "false"),
 		"git_remotes_default": cmp.Or(os.Getenv("OVNFS_GIT_REMOTES"), conf.GitRemotes, "true"),
@@ -107,6 +108,7 @@ type serveCmd struct {
 	Listen     string   `help:"File server address; defaults to a free local port or a Unix socket for NFS on macOS."`
 	Memory     byteSize `help:"Memory budget for small written files; 0 writes every file to disk." default:"${memory_default}"`
 	Fsync      bool     `help:"Spill and sync memory files on fsync (NFS does not forward fsync)." default:"${fsync_default}"`
+	NodeCache  byteSize `help:"Estimated cache bytes for derived node ids and listings; keeps at least the current directory." default:"${node_cache_default}"`
 	BlobCache  byteSize `help:"Memory budget for small content-addressed blobs; 0 disables." default:"${blob_cache_default}"`
 	Atime      bool     `help:"Allow access time updates on the mount." default:"${atime_default}"`
 	GitRemotes bool     `help:"Give each source repository a git remote ovnfs/NAME per checkout of it." default:"${git_remotes_default}" negatable:""`
@@ -243,6 +245,7 @@ func (cmd *serveCmd) Run(c *cli) error {
 	if err != nil {
 		return fmt.Errorf("export: %w", err)
 	}
+	e.SetNodeCache(int64(cmd.NodeCache))
 	exported.Store(e)
 	defer e.Close()
 	if checkoutShares, err = newShares(state, reg, e); err != nil {
@@ -283,7 +286,7 @@ func (cmd *serveCmd) Run(c *cli) error {
 	go lk.listen(linkListener)
 	stops := make(chan stopRequest)
 	welcome := admin.Welcome{Version: protocolVersion, Ops: api.Ops, Features: api.Features, Proto: proto, Port: port, Mount: mount, State: state}
-	handler := &opsHandler{reg: reg, shares: checkoutShares, links: lk, welcome: welcome, started: time.Now(), stop: func(ctx context.Context, a api.StopArgs) error {
+	handler := &opsHandler{nodeCache: e.NodeCache, nodeIndexBytes: e.NodeIndexBytes, nodeCacheError: e.NodeCacheError, reg: reg, shares: checkoutShares, links: lk, welcome: welcome, started: time.Now(), stop: func(ctx context.Context, a api.StopArgs) error {
 		done := make(chan error, 1)
 		select {
 		case stops <- stopRequest{keepMount: a.KeepMount, done: done}:
