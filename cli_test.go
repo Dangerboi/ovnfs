@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -191,5 +192,61 @@ func TestSecondsFlag(t *testing.T) {
 		if (err != nil) != tt.bad || !tt.bad && float64(s) != tt.want {
 			t.Errorf("UnmarshalText(%q) = %v, %v; want %v, error %v", tt.in, float64(s), err, tt.want, tt.bad)
 		}
+	}
+}
+
+func TestScopeLsReply(t *testing.T) {
+	r := api.LsReply{
+		Checkouts: []api.Checkout{{Name: "x"}, {Name: "y"}},
+		Snapshots: []api.Snapshot{
+			{ID: "s1", Checkout: "x", Label: "one"},
+			{ID: "s2", Checkout: "y", Label: "two"},
+		},
+	}
+	got := scopeLsReply(r, "x")
+	if len(got.Checkouts) != 1 || got.Checkouts[0].Name != "x" {
+		t.Fatalf("checkouts = %+v", got.Checkouts)
+	}
+	if len(got.Snapshots) != 1 || got.Snapshots[0].ID != "s1" {
+		t.Fatalf("snapshots = %+v", got.Snapshots)
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Checkouts []struct {
+			Name string `json:"name"`
+		} `json:"checkouts"`
+		Snapshots []struct {
+			ID       string `json:"id"`
+			Checkout string `json:"checkout"`
+		} `json:"snapshots"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Checkouts) != 1 || payload.Checkouts[0].Name != "x" {
+		t.Fatalf("json checkouts = %s", raw)
+	}
+	if len(payload.Snapshots) != 1 || payload.Snapshots[0].ID != "s1" || payload.Snapshots[0].Checkout != "x" {
+		t.Fatalf("json snapshots = %s", raw)
+	}
+
+	missing := scopeLsReply(r, "z")
+	raw, err = json.Marshal(missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"checkouts":[],"snapshots":[]}` {
+		t.Fatalf("missing name = %s, want empty lists", raw)
+	}
+
+	orphans := scopeLsReply(api.LsReply{
+		Checkouts: []api.Checkout{{Name: "y"}},
+		Snapshots: []api.Snapshot{{ID: "s3", Checkout: "gone"}},
+	}, "gone")
+	if len(orphans.Checkouts) != 0 || len(orphans.Snapshots) != 1 || orphans.Snapshots[0].ID != "s3" {
+		t.Fatalf("orphan scope = %+v", orphans)
 	}
 }

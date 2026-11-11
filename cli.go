@@ -90,6 +90,26 @@ func (cmd *lsCmd) Run(c *cli) error {
 		}
 		a.Dir = dir
 	}
+	if name != "" && c.json {
+		raw, callErr := c.call("ls", a)
+		r, err := decodeReply[api.LsReply]("ls", raw, callErr)
+		if err != nil {
+			return err
+		}
+		r = scopeLsReply(r, name)
+		if len(r.Checkouts) == 0 && len(r.Snapshots) == 0 {
+			if isDirArg(name) {
+				return fmt.Errorf("ls: no checkout %s; for the folder, ls ./%s", name, name)
+			}
+			return fmt.Errorf("ls: no checkout %s", name)
+		}
+		out, err := json.Marshal(r)
+		if err != nil {
+			return fmt.Errorf("ls: encoding reply: %w", err)
+		}
+		fmt.Println(string(out))
+		return nil
+	}
 	r, err := call[api.LsReply](c, "ls", a)
 	if err != nil || c.json {
 		return err
@@ -117,6 +137,24 @@ func (cmd *lsCmd) Run(c *cli) error {
 		return fmt.Errorf("ls: no checkout %s", name)
 	}
 	return nil
+}
+
+// scopeLsReply keeps only the named checkout and its snapshots, the same
+// scope the human table for `ls NAME` applies. The daemon lists everything;
+// the JSON path used to print that unfiltered reply.
+func scopeLsReply(r api.LsReply, name string) api.LsReply {
+	out := api.LsReply{Checkouts: []api.Checkout{}, Snapshots: []api.Snapshot{}}
+	for _, h := range r.Checkouts {
+		if h.Name == name {
+			out.Checkouts = append(out.Checkouts, h)
+		}
+	}
+	for _, s := range r.Snapshots {
+		if s.Checkout == name {
+			out.Snapshots = append(out.Snapshots, s)
+		}
+	}
+	return out
 }
 
 // printCheckouts lists live checkouts and retained snapshots without a live owner.
