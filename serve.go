@@ -256,7 +256,7 @@ func (cmd *serveCmd) Run(c *cli) error {
 		if mountErr != nil {
 			return mountErr
 		}
-		release = func(bool) error { return srv.Unmount() }
+		release = srv.Unmount
 		go func() { srv.Wait(); served <- fmt.Errorf("%s mount at %s ended", proto, mount) }()
 		if err = reg.SetListen(proto, 0); err != nil {
 			_ = release(true)
@@ -316,7 +316,10 @@ func (cmd *serveCmd) Run(c *cli) error {
 			return nil
 		}
 		if err = release(force); err != nil {
-			err = fmt.Errorf("unmount: %w; stop again to force", err)
+			err = fmt.Errorf("unmount: %w", err)
+			if !force {
+				err = fmt.Errorf("%w; stop again to force", err)
+			}
 			log.Print(err)
 			force = true
 		}
@@ -426,7 +429,9 @@ func defaultProto() string {
 // inProcessMount is a mount whose filesystem driver calls back into this
 // process (FUSE, WinFsp), so it ends with the daemon.
 type inProcessMount interface {
-	Unmount() error
+	// Unmount ends the mount. Without force it fails while the mount is busy;
+	// with force it ends it anyway.
+	Unmount(force bool) error
 	Wait()
 }
 

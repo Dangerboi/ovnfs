@@ -115,7 +115,7 @@ func (f *fixture) unmount(t *testing.T) {
 	if f.srv == nil {
 		return
 	}
-	if err := f.srv.Unmount(); err != nil {
+	if err := f.srv.Unmount(false); err != nil {
 		t.Error(err)
 	}
 	f.srv.Wait()

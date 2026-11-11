@@ -18,7 +18,7 @@ func Mount(*export.Export, string, Options) (*Server, error) {
 }
 
 // Unmount reports that no mount can exist on this OS.
-func (*Server) Unmount() error { return fmt.Errorf("fuse: unsupported on %s", runtime.GOOS) }
+func (*Server) Unmount(bool) error { return fmt.Errorf("fuse: unsupported on %s", runtime.GOOS) }
 
 // Wait returns at once because no mount can exist on this OS.
 func (*Server) Wait() {}

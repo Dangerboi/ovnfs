@@ -16,6 +16,7 @@ import (
 type Server struct {
 	srv        *gofuse.Server
 	mountpoint string
+	abort      *os.File // this connection's fusectl abort file; nil without fusectl
 }
 
 // Mount serves e at mountpoint until Unmount, creating the directory. A dead
@@ -56,7 +57,17 @@ func Mount(e *export.Export, mountpoint string, opts Options) (*Server, error) {
 		srv.Unmount()
 		return nil, fmt.Errorf("fuse: mount %s: %w", mountpoint, err)
 	}
-	return &Server{srv: srv, mountpoint: mountpoint}, nil
+	// fusectl names a connection by its mount's device number in the kernel's
+	// encoding (major<<20 | minor). The file stays open: once the connection
+	// is gone a write to it is a no-op, where the path could by then name a
+	// later mount given the same number. Without fusectl it stays nil and a
+	// forced Unmount can only unmount plainly.
+	var stx unix.Statx_t
+	var abort *os.File
+	if err := unix.Statx(unix.AT_FDCWD, mountpoint, unix.AT_STATX_DONT_SYNC, 0, &stx); err == nil {
+		abort, _ = os.OpenFile(fmt.Sprintf("/sys/fs/fuse/connections/%d/abort", stx.Dev_major<<20|stx.Dev_minor), os.O_WRONLY, 0)
+	}
+	return &Server{srv: srv, mountpoint: mountpoint, abort: abort}, nil
 }
 
 // detachDead lazily unmounts mountpoint when it is a FUSE mount whose server
@@ -82,10 +93,34 @@ func detachDead(mountpoint string) error {
 	return nil
 }
 
-// Unmount detaches the mount; it fails while files on it are in use.
-func (s *Server) Unmount() error {
+// Unmount ends the mount and returns once the server has stopped. It fails
+// while files on it are in use, unless force is set: then it aborts the
+// connection, so whatever still uses the mount fails (ENOTCONN; EIO for
+// reads of uncached data) and no request reaches the export any more, and
+// detaches the dead mount. Without fusectl at mount time force cannot abort,
+// and a busy mount fails as without it.
+func (s *Server) Unmount(force bool) error {
 	if err := s.srv.Unmount(); err != nil {
-		return fmt.Errorf("fuse: unmount %s: %w", s.mountpoint, err)
+		err = fmt.Errorf("fuse: unmount %s: %w", s.mountpoint, err)
+		if !force {
+			return err
+		}
+		if s.abort == nil {
+			return fmt.Errorf("%w (not forced: no fusectl at /sys/fs/fuse/connections when it was mounted)", err)
+		}
+		if _, err := s.abort.Write([]byte("1")); err != nil {
+			return fmt.Errorf("fuse: abort %s: %w", s.mountpoint, err)
+		}
+		s.srv.Wait()
+		// Only the dead mount: the path may since have been unmounted, or
+		// hold a later live mount.
+		if err := detachDead(s.mountpoint); err != nil {
+			return err
+		}
+	}
+	if s.abort != nil {
+		s.abort.Close()
+		s.abort = nil
 	}
 	return nil
 }
