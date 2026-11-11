@@ -919,7 +919,9 @@ func (r *Registry) emit(event Event) {
 
 // removeOrphansLocked reclaims filesystem leftovers not named by the recovered manifest.
 // A leftover that cannot be removed is reported as a fault and kept for the next
-// open: it is no reason to keep every other checkout down.
+// open: it is no reason to keep every other checkout down. As after a failed Rm,
+// a kept upper or git directory keeps its name reserved, so no new checkout
+// inherits its files.
 func (r *Registry) removeOrphansLocked() error {
 	dirs := make(map[string]bool, len(r.checkouts))
 	for _, h := range r.checkouts {
@@ -945,6 +947,9 @@ func (r *Registry) removeOrphansLocked() error {
 			}
 			if !retained {
 				if err = removeTree(filepath.Join(r.config.State, kind, name)); err != nil {
+					if kind == "uppers" || kind == "git" {
+						r.reserved[name] = true
+					}
 					r.enqueueNotice(baseNotice{fault: "remove leftover " + kind + "/" + name + ": " + err.Error()})
 				}
 			}

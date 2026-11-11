@@ -127,8 +127,9 @@ func TestOpenReclaimsOrphanWithUnwritableDir(t *testing.T) {
 }
 
 // TestOpenSurvivesUndeletableOrphan checks that one orphan that cannot be removed
-// at all (here its parent directory is read-only) is reported as a fault, and the
-// registry still opens with its checkouts instead of exiting before it serves.
+// at all (here its parent directory is read-only) is reported as a fault, the
+// registry still opens with its checkouts instead of exiting before it serves,
+// and the orphan's name stays taken so no new checkout inherits its files.
 func TestOpenSurvivesUndeletableOrphan(t *testing.T) {
 	enforcedPerms(t)
 	f := newFixture(t)
@@ -174,5 +175,12 @@ func TestOpenSurvivesUndeletableOrphan(t *testing.T) {
 	})
 	if _, err := os.Lstat(filepath.Join(uppers, "stuck")); err != nil {
 		t.Fatalf("undeletable orphan: %v", err)
+	}
+	if err := os.Chmod(uppers, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.reg.New(context.Background(), api.NewArgs{Dir: folder(t, map[string]string{"a": "base"}), Name: "stuck"})
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("new checkout over the kept orphan's name = %v; want already exists", err)
 	}
 }
