@@ -52,27 +52,26 @@ func (v bottom) ReadDir(p string) ([]os.FileInfo, error) {
 	}
 	// Both lists are sorted. Native metadata serves every present child;
 	// captured names missing from the host still retain their fork-time info.
-	names := b.children[p]
+	children := b.children[p]
 	lower, listErr := fsys.ReadDir(b.lower(p))
-	out := make([]os.FileInfo, 0, len(names))
-	for i, j := 0, 0; i < len(names) || j < len(lower); {
-		var name string
+	out := make([]os.FileInfo, 0, len(children))
+	for i, j := 0, 0; i < len(children) || j < len(lower); {
+		var child string
 		var entry os.DirEntry
 		switch {
-		case j == len(lower) || i < len(names) && names[i] < lower[j].Name():
-			name = names[i]
+		case j == len(lower) || i < len(children) && path.Base(children[i]) < lower[j].Name():
+			child = children[i]
 			i++
-		case i == len(names) || lower[j].Name() < names[i]:
+		case i == len(children) || lower[j].Name() < path.Base(children[i]):
 			entry = lower[j]
-			name = entry.Name()
+			child = path.Join(p, entry.Name())
 			j++
 		default:
 			entry = lower[j]
-			name = names[i]
+			child = children[i]
 			i++
 			j++
 		}
-		child := path.Join(p, name)
 		if child == ".git" || source.IsJJPath(child) {
 			continue
 		}
@@ -91,7 +90,7 @@ func (v bottom) ReadDir(p string) ([]os.FileInfo, error) {
 		if listErr != nil || err != nil {
 			_, current, err = b.resolve(child)
 		} else if captured {
-			_, current, err = b.sourceInfo(child, b.lower(child), e, current)
+			current, _ = b.sourceInfo(child, e, current)
 		} else if !b.lowerAncestorsAreDirs(child) {
 			continue
 		}
@@ -239,7 +238,11 @@ func (b *Base) resolve(p string) (string, os.FileInfo, error) {
 	if e, ok := b.sources[p]; ok {
 		host := b.lower(p)
 		current, _ := hostfile.Lstat(host)
-		return b.sourceInfo(p, host, e, current)
+		info, live := b.sourceInfo(p, e, current)
+		if live {
+			return host, info, nil
+		}
+		return "", info, nil
 	}
 	if root, live := b.derivedRoot(p); root != "" && live {
 		return b.live(p)
@@ -248,35 +251,39 @@ func (b *Base) resolve(p string) (string, os.FileInfo, error) {
 }
 
 // sourceInfo selects current or captured metadata after a stat or bulk listing.
-func (b *Base) sourceInfo(p, host string, e entry, current os.FileInfo) (string, os.FileInfo, error) {
+func (b *Base) sourceInfo(p string, e entry, current os.FileInfo) (os.FileInfo, bool) {
 	if e.mode.IsDir() {
 		if current != nil && current.IsDir() {
-			return host, current, nil
+			return current, true
 		}
-		return "", capturedInfo{name: path.Base("/" + p), mode: e.mode, mtime: b.meta.ForkTime}, nil
+		name := path.Base(p)
+		if p == "" {
+			name = "/"
+		}
+		return capturedInfo{name: name, mode: e.mode, mtime: b.meta.ForkTime}, false
 	}
 	captured := b.capture.Info[p]
-	if current != nil && b.unchanged(host, current, e, captured) {
-		return host, current, nil
+	if current != nil && b.unchanged(p, current, e, captured) {
+		return current, true
 	}
 	mtime := captured.Mtime
 	if mtime.IsZero() {
 		mtime = b.meta.ForkTime
 	}
-	return "", capturedInfo{name: path.Base(p), mode: e.mode, size: captured.Size, mtime: mtime}, nil
+	return capturedInfo{name: path.Base(p), mode: e.mode, size: captured.Size, mtime: mtime}, false
 }
 
 // unchanged reports a folder entry that still is the captured file: same type,
 // size, mtime and inode. The inode check keeps a swapped-in lookalike (an
 // ancestor directory replaced by a copy) from being served as captured content.
-func (b *Base) unchanged(host string, current os.FileInfo, e entry, captured source.Info) bool {
+func (b *Base) unchanged(p string, current os.FileInfo, e entry, captured source.Info) bool {
 	if current.Mode().Type() != e.mode.Type() || current.Size() != captured.Size || !current.ModTime().Equal(captured.Mtime) {
 		return false
 	}
 	if captured.Ino == 0 {
 		return false
 	}
-	_, ino, err := fileIdentity(current, host)
+	_, ino, err := fileIdentity(current, b.meta.Dir, p)
 	return err == nil && ino == captured.Ino
 }
 

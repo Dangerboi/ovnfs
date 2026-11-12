@@ -48,8 +48,8 @@ func (f *fixture) picked(sel api.Select) []string {
 // TestSelect checks each criterion and that given together they all must hold.
 func TestSelect(t *testing.T) {
 	f, app := selectFixture(t)
-	s, err := f.reg.Enter("other")
-	if err != nil {
+	var s Session
+	if err := f.reg.Enter("other", &s); err != nil {
 		t.Fatal(err)
 	}
 	s.Touch()
@@ -91,8 +91,8 @@ func TestPrune(t *testing.T) {
 		t.Fatalf("dry run = %+v, %v; %d checkouts left", dry, err, len(f.ls().Checkouts))
 	}
 	picked := f.ls().Checkouts[0]
-	s, err := f.reg.Enter(picked.Name)
-	if err != nil {
+	var s Session
+	if err := f.reg.Enter(picked.Name, &s); err != nil {
 		t.Fatal(err)
 	}
 	s.Touch()

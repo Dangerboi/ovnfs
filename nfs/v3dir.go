@@ -97,11 +97,8 @@ func (s *Server) list3(d *decoder, res *encoder, plus bool) status {
 			fits = false
 			break
 		}
-		if child == "" {
-			child = path.Join(p, info.Name())
-		}
 		c := l.first + uint64(i)
-		childID := s.FS.FileID(child)
+		childID := s.FS.ChildID(p, info.Name())
 		if childID == 0 {
 			return stIO
 		}

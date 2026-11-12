@@ -30,17 +30,13 @@ func (e *nativeInfo) Sys() any                   { return &e.st }
 func (e *nativeInfo) Type() fs.FileMode          { return e.mode.Type() }
 func (e *nativeInfo) Info() (fs.FileInfo, error) { return e, nil }
 
-// infoSlabSize is how many nativeInfo values one allocation holds.
-const infoSlabSize = 32
-
-// newInfo appends a zeroed nativeInfo to *slab, starting a new slab when the
-// current one is full, and returns it. Earlier values stay where they are.
+// newInfo takes the next nativeInfo from a batch-sized slab. Its backing
+// array is never grown or reused: returned interfaces point into it.
 func newInfo(slab *[]nativeInfo) *nativeInfo {
-	if len(*slab) == cap(*slab) {
-		*slab = make([]nativeInfo, 0, infoSlabSize)
-	}
-	*slab = append(*slab, nativeInfo{})
-	return &(*slab)[len(*slab)-1]
+	*slab = (*slab)[:len(*slab)+1]
+	info := &(*slab)[len(*slab)-1]
+	*info = nativeInfo{}
+	return info
 }
 
 // dropInfo releases the nativeInfo newInfo returned last.

@@ -7,7 +7,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -59,7 +58,7 @@ func newRemoteState(b *Base) *remoteState {
 			parent = ""
 		}
 		if _, ok := b.sources[parent]; ok {
-			b.children[parent] = append(b.children[parent], path.Base(root))
+			b.children[parent] = append(b.children[parent], root)
 		}
 	}
 	return r
@@ -149,8 +148,7 @@ func (r *remoteState) prefetch(p string) {
 			continue
 		}
 		var subdirs []string
-		for _, name := range r.b.children[d] {
-			q := path.Join(d, name)
+		for _, q := range r.b.children[d] {
 			e, ok := r.b.sources[q]
 			if !ok {
 				continue
@@ -284,11 +282,10 @@ func (v remoteBottom) ReadDir(p string) ([]os.FileInfo, error) {
 	if !info.IsDir() {
 		return nil, &fs.PathError{Op: "readdir", Path: p, Err: syscall.ENOTDIR}
 	}
-	names := append([]string(nil), v.b.children[p]...)
-	sort.Strings(names)
-	out := make([]os.FileInfo, 0, len(names))
-	for _, name := range names {
-		if child, err := v.info(path.Join(p, name)); err == nil {
+	children := v.b.children[p]
+	out := make([]os.FileInfo, 0, len(children))
+	for _, name := range children {
+		if child, err := v.info(name); err == nil {
 			out = append(out, child)
 		}
 	}
@@ -345,8 +342,8 @@ func (v remoteBottom) CopyTo(p, dst string) error {
 		if err := os.Mkdir(dst, info.Mode().Perm()|0o700); err != nil {
 			return err
 		}
-		for _, name := range v.b.children[p] {
-			if err := v.CopyTo(path.Join(p, name), filepath.Join(dst, name)); err != nil && !os.IsNotExist(err) {
+		for _, child := range v.b.children[p] {
+			if err := v.CopyTo(child, filepath.Join(dst, path.Base(child))); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 		}

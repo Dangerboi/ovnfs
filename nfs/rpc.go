@@ -149,14 +149,15 @@ func (c *conn) serve() {
 func readRecord(r *bufio.Reader, buf []byte) ([]byte, error) {
 	buf = buf[:0]
 	for {
-		var mark [4]byte
-		if _, err := io.ReadFull(r, mark[:]); err != nil {
-			if len(buf) != 0 && errors.Is(err, io.EOF) {
+		mark, err := r.Peek(4)
+		if err != nil {
+			if (len(mark) != 0 || len(buf) != 0) && errors.Is(err, io.EOF) {
 				err = io.ErrUnexpectedEOF
 			}
 			return nil, err
 		}
-		h := binary.BigEndian.Uint32(mark[:])
+		h := binary.BigEndian.Uint32(mark)
+		_, _ = r.Discard(4)
 		n := int(h &^ lastFragment)
 		if len(buf)+n > maxRecord {
 			return nil, errRecordTooLarge

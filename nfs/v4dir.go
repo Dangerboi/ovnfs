@@ -127,7 +127,7 @@ func (x *v4compound) readdir() status {
 			v4bitmap{}.put(x.e)
 			x.e.u32(0)
 		} else {
-			id := x.s.FS.FileID(v4Join(cur.path, info.Name()))
+			id := x.s.FS.ChildID(cur.path, info.Name())
 			if id == 0 {
 				return stIO
 			}

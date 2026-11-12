@@ -64,8 +64,8 @@ func (r *Registry) Explain(ctx context.Context, args api.ExplainArgs) (api.Expla
 			}
 			set = rules.Set{Rules: append(extra, set.Rules...)}
 		}
-		s, err := r.Enter(args.Checkout)
-		if err != nil {
+		var s Session
+		if err := r.Enter(args.Checkout, &s); err != nil {
 			return api.ExplainReply{}, err
 		}
 		dec, exists = source.Explain(overlayView{s.FS}, h.base.view.Domains(), set, p)

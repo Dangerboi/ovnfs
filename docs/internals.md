@@ -231,11 +231,17 @@ search. Search keeps compact names, types and optional size/mtime records;
 `fsys.ReadDir` supplies complete metadata and per-entry errors without adding
 full stat records to compact listings.
 
-Source listings merge sorted captured names with native metadata, retaining
-captured metadata for changed or missing host entries without statting every
-child again. A bottom-only overlay lets the bottom validate the directory
-once, including rejecting final symlinks. Junction metadata constructs host
-paths only for Windows reparse entries.
+Source listings merge their immutable root-relative child paths with native
+metadata, retaining captured metadata for changed or missing host entries
+without statting or rebuilding every child's path. A bottom-only overlay
+takes ownership of the bottom's sorted listing slice and filters it in place;
+neither it nor NFS copies or sorts that listing again. The bottom validates
+the directory once, including rejecting final symlinks. Junction metadata
+constructs host paths only for Windows reparse entries.
+
+Native metadata names share compact, immutable batch storage rather than a
+string allocation per entry. Metadata records share batch-sized slabs; a
+listing remains valid independently of later session reuse.
 
 Both modes use the same native enumeration loops and reusable buffers:
 Darwin's EOF-aware `getdirentries64` and `getattrlistbulk`, Linux's
@@ -367,9 +373,22 @@ below the several GiB an unbounded walk can retain; smaller machines can lower
 it with the same knob. It does not bound total daemon RSS.
 
 Resident name lookups walk their parent path once without paging or retaining
-unneeded operation state. Operations that may release the node mutex reuse
-pooled pin sets; release clears node references, and oversized sets are not
-retained by the pool.
+unneeded operation state. Listed child identities accept a directory and
+basename separately, avoiding full-path construction. Unchanged identity
+listings reuse their existing maps and names. New names share directory-owned
+storage; materialized children own their basenames so held files cannot retain
+an evicted directory's arena. Cold names borrow the immutable index read buffer,
+whose entire size stays charged while resident owners retain it.
+
+An in-flight node operation snapshots the node and its maximum ancestral move
+stamp, not an allocated ancestor list. Each relocation receives a table-wide
+increasing stamp: even an ancestor moving away and back raises the maximum,
+while unrelated moves leave it unchanged. Retained nodes prevent their
+ancestors from paging out during that operation.
+
+Filesystem calls use caller-owned checkout session guards with idempotent
+release. Operations that may release the node mutex reuse pooled pin sets;
+release clears node references, and oversized sets are not retained by the pool.
 
 The budget estimates map, node and name bytes (about 320 per resident logged
 node, 64 per cold logged child of a resident directory), rather than measuring
@@ -413,8 +432,9 @@ an entry that cannot fit. Continuations still refresh metadata first, so a
 removed entry cannot block a later name that fits. Each connection reuses a
 bounded pool of request workers, started
 on demand; each worker reuses its call and reply-encoder storage, clearing
-buffer references after replying. Disconnect drains accepted calls before
-releasing the connection.
+buffer references after replying. Record markers are decoded directly from
+the buffered reader rather than a heap-allocated four-byte temporary.
+Disconnect drains accepted calls before releasing the connection.
 Its kept writable files expire when idle. NFSv4 state follows client
 leases and explicit close/unlock/delegation return. The overlay's `pathIDs` and
 `aliases` describe current upper files, are removed with those files, and do

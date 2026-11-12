@@ -84,7 +84,7 @@ func TestIndexIODoesNotHoldNodeMutex(t *testing.T) {
 			// must revalidate location and ownership instead of evicting stale state.
 			nt.mu.Lock()
 			d := nt.find("co")
-			d.moves++
+			nt.moved(d)
 			delete(d.parent.kids, d.name)
 			d.name = "moved"
 			d.parent.kids[d.name] = d

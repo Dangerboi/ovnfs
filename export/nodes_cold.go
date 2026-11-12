@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"unsafe"
 )
 
 // Cold identities retain their exact names in a disk index, beside the hashes
@@ -105,7 +106,6 @@ func readColdNames(ix coldIndex) (names map[uint32]string, retired []uint32, err
 	if err != nil {
 		return nil, nil, err
 	}
-	names = make(map[uint32]string)
 	if len(data) < 4 {
 		return nil, nil, io.ErrUnexpectedEOF
 	}
@@ -113,6 +113,10 @@ func readColdNames(ix coldIndex) (names map[uint32]string, retired []uint32, err
 	if uint64(n)*16+4 > uint64(len(data)) {
 		return nil, nil, io.ErrUnexpectedEOF
 	}
+	names = make(map[uint32]string, n)
+	// SAFETY: readColdIndex returned exclusively owned bytes. Nothing mutates
+	// them after this point; name substrings keep that allocation alive.
+	text := unsafe.String(unsafe.SliceData(data), len(data))
 	for i := uint32(0); i < n; i++ {
 		row := data[4+int(i)*16:]
 		h, size, offset := binary.LittleEndian.Uint32(row[:4]), binary.LittleEndian.Uint32(row[4:8]), binary.LittleEndian.Uint64(row[8:16])
@@ -123,7 +127,7 @@ func readColdNames(ix coldIndex) (names map[uint32]string, retired []uint32, err
 			retired = append(retired, h)
 			continue
 		}
-		names[h] = string(data[offset : offset+uint64(size)])
+		names[h] = text[offset : offset+uint64(size)]
 	}
 	return names, retired, nil
 }
@@ -393,14 +397,24 @@ func (t *nodeTable) loadCold(d *node) bool {
 	if s == nil || !s.cold || s.coldLoaded {
 		return true
 	}
-	names, valid := t.readOwners(d)
+	names, bytes, valid := t.readOwners(d)
 	if !valid {
 		return false
 	}
+	if s.coldLoaded {
+		return true
+	}
+	adopted := false
 	for h, name := range names {
 		if !t.takenExceptCold(d, h) {
 			t.addLeaf(d, name)
+			adopted = true
 		}
+	}
+	if adopted {
+		// Any retained name owns the immutable index buffer, including its
+		// row table. Keep the whole allocation charged until eviction.
+		t.charge(d, bytes)
 	}
 	s.coldLoaded = true
 	return true
@@ -534,15 +548,16 @@ type coldOperation struct {
 	gen      uint64
 	location nodeLocation
 	names    map[uint32]string
+	bytes    int64
 	retired  []uint32
 	err      error
 }
 
-func (t *nodeTable) readOwners(d *node) (map[uint32]string, bool) {
+func (t *nodeTable) readOwners(d *node) (map[uint32]string, int64, bool) {
 	s := d.dir
 	for {
 		if t.cacheErr != nil || t.byID[d.id] != d {
-			return nil, false
+			return nil, 0, false
 		}
 		if op := s.indexing; op != nil {
 			t.mu.Unlock()
@@ -567,7 +582,7 @@ func (t *nodeTable) readOwners(d *node) (map[uint32]string, bool) {
 		names, retired, err := readColdNames(ix)
 		t.mu.Lock()
 		s.reading--
-		op.names, op.retired, op.err = names, retired, err
+		op.names, op.bytes, op.retired, op.err = names, ix.size, retired, err
 		close(op.done)
 		s.indexing = nil
 		return t.readResult(d, op)
@@ -576,17 +591,17 @@ func (t *nodeTable) readOwners(d *node) (map[uint32]string, bool) {
 
 // readResult validates a finished read for d. Retired hashes it found join
 // d's resident ones; an unreadable adopted index yields no owners.
-func (t *nodeTable) readResult(d *node, op *coldOperation) (map[uint32]string, bool) {
+func (t *nodeTable) readResult(d *node, op *coldOperation) (map[uint32]string, int64, bool) {
 	if t.cacheErr != nil || t.byID[d.id] != d || d.dir.gen != op.gen || !op.location.holds(d) {
-		return nil, false
+		return nil, 0, false
 	}
 	if op.err != nil {
 		if op.prior {
 			t.forgetPrior(d)
-			return nil, true
+			return nil, 0, true
 		}
 		t.cacheFailure(op.err)
-		return nil, false
+		return nil, 0, false
 	}
 	for _, h := range op.retired {
 		d.dir.retire(h)
@@ -594,7 +609,7 @@ func (t *nodeTable) readResult(d *node, op *coldOperation) (map[uint32]string, b
 	if op.gone {
 		d.dir.retire(op.hash)
 	}
-	return op.names, true
+	return op.names, op.bytes, true
 }
 
 // batchRecovery distinguishes a directory rewalk from sparse retained handles.
@@ -629,13 +644,14 @@ func (t *nodeTable) readOwner(d *node, hash uint32) (string, bool) {
 				continue
 			}
 			if !op.single {
-				names, valid := t.readResult(d, op)
-				return names[hash], valid
+				names, _, valid := t.readResult(d, op)
+				// A sparse owner must not retain an entire shared bulk read.
+				return strings.Clone(names[hash]), valid
 			}
 			if op.hash != hash {
 				continue
 			}
-			_, valid := t.readResult(d, op)
+			_, _, valid := t.readResult(d, op)
 			return op.name, valid
 		}
 		op := &coldOperation{done: make(chan struct{}), read: true, single: true, prior: s.prior, hash: hash, gen: s.gen, location: locate(d)}
@@ -652,7 +668,7 @@ func (t *nodeTable) readOwner(d *node, hash uint32) (string, bool) {
 		op.name, op.gone, op.err = name, gone, err
 		close(op.done)
 		s.indexing = nil
-		_, valid := t.readResult(d, op)
+		_, _, valid := t.readResult(d, op)
 		return name, valid
 	}
 }

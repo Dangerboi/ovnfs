@@ -3,6 +3,7 @@ package export
 import (
 	"container/list"
 	"os"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -86,6 +87,7 @@ type nodeTable struct {
 	byID         map[uint64]*node // resident nodes
 	byKey        map[uint64]*node // resident logged nodes
 	next         uint64           // next counter id or key
+	moveSerial   uint64           // monotonic stamp assigned to every relocation
 	index        *nodeIndex       // where logged nodes page out; nil keeps them resident
 	nodesBytes   int64            // size of the logged node index
 	runtimeBytes int64            // size of its slots for keys allocated since open
@@ -106,7 +108,7 @@ type nodeTable struct {
 // node links an identity to its current parent and basename.
 type node struct {
 	holds  int    // live protocol state, protected by the table mutex
-	moves  uint64 // changes on each relocation, including moves back to the same path
+	moves  uint64 // table-wide stamp of the last relocation
 	id     uint64
 	key    uint64 // 0 while the node is unlogged (derived, never recorded)
 	name   string
@@ -137,6 +139,9 @@ type dirState struct {
 	// through the export since, to its name, or to ambiguous when several
 	// entries share it. nil until listed.
 	entries map[uint32]string
+	// names owns the first batch of new basenames until eviction. Later
+	// listings reuse canonical names; namespace additions own only new names.
+	names string
 	// dups lists every name of each ambiguous hash of the latest listing.
 	dups map[uint32][]string
 	// retired holds the hashes of retired derived children: their ids are
@@ -241,6 +246,35 @@ func (t *nodeTable) id(p string) (id uint64) {
 	}
 }
 
+// childID resolves listed children directly under a resident directory. Cold
+// recovery and an unknown listing still use id's full namespace validation.
+func (t *nodeTable) childID(dir, name string) uint64 {
+	t.mu.Lock()
+	if t.spillErr != nil {
+		t.trimCache()
+	}
+	if t.cacheErr != nil {
+		t.mu.Unlock()
+		return 0
+	}
+	d := t.find(dir)
+	if d == nil || d.key == 0 || d.dir != nil && d.dir.cold && !d.dir.coldLoaded {
+		t.mu.Unlock()
+		return t.id(path.Join(dir, name))
+	}
+	id, unlisted := t.ensureChild(d, name, nil, true)
+	t.flush()
+	t.trimCache()
+	if t.cacheErr != nil {
+		id, unlisted = 0, nil
+	}
+	t.mu.Unlock()
+	if unlisted != nil {
+		return t.id(path.Join(dir, name))
+	}
+	return id
+}
+
 // lookup returns p's id without allocating: a path the server never handed
 // out has no handle a client could cache.
 func (t *nodeTable) lookup(p string) (uint64, bool) {
@@ -330,7 +364,7 @@ func (t *nodeTable) subtree(p string) []uint64 {
 			if !valid || !old.s.cold || old.s.coldLoaded {
 				continue
 			}
-			names, ok := t.readOwners(old.n)
+			names, _, ok := t.readOwners(old.n)
 			if !ok {
 				valid = false
 				break
@@ -460,7 +494,7 @@ func (t *nodeTable) rename(from, to string) {
 		t.drop(dst)
 	}
 	if src != nil {
-		src.moves++
+		t.moved(src)
 		if src.key == 0 && src.holds == 0 {
 			t.charge(src.parent, -int64(160+len(src.name)))
 		}
@@ -559,56 +593,34 @@ type listing struct {
 	location nodeLocation
 }
 
-type nodePosition struct {
-	n     *node
+// nodeLocation identifies a node and its most recent ancestral relocation.
+// Each move gets a table-wide increasing stamp, so moving any ancestor,
+// including away and back, necessarily raises the maximum on this chain.
+// Unrelated moves do not invalidate it. No ancestor slice needs to be retained.
+type nodeLocation struct {
+	node  *node
 	moves uint64
 }
 
-// inlineDepth is the number of ancestors a nodeLocation holds without a
-// separate allocation; deeper paths overflow into a slice.
-const inlineDepth = 8
-
-// nodeLocation snapshots a node and every ancestor with its move counter, so
-// a later check rejects any relocation of the node or an ancestor, including
-// a move away and back to the same path. It is a plain value: copies share
-// only the immutable overflow slice.
-type nodeLocation struct {
-	inline [inlineDepth]nodePosition // n, then its ancestors up to the root
-	deep   []nodePosition            // the ancestors past inlineDepth
-	count  int                       // positions held inline
+// moved records a relocation while the table mutex is held.
+func (t *nodeTable) moved(n *node) {
+	t.moveSerial++
+	n.moves = t.moveSerial
 }
 
-// locate snapshots n's location. The mutex must be held.
+// locate snapshots n's location. In-flight operations retain n, preventing
+// its ancestors from paging out and losing their transient relocation stamps.
 func locate(n *node) nodeLocation {
-	var loc nodeLocation
-	for ; n != nil; n = n.parent {
-		p := nodePosition{n, n.moves}
-		if loc.count < inlineDepth {
-			loc.inline[loc.count] = p
-			loc.count++
-		} else {
-			loc.deep = append(loc.deep, p)
-		}
+	loc := nodeLocation{node: n}
+	for p := n; p != nil; p = p.parent {
+		loc.moves = max(loc.moves, p.moves)
 	}
 	return loc
 }
 
-// holds reports whether n still has exactly the ancestry and move counters
-// the snapshot recorded. The mutex must be held.
+// holds rejects relocation of n or an ancestor while the mutex is held.
 func (loc *nodeLocation) holds(n *node) bool {
-	for _, old := range loc.inline[:loc.count] {
-		if n != old.n || n.moves != old.moves {
-			return false
-		}
-		n = n.parent
-	}
-	for _, old := range loc.deep {
-		if n != old.n || n.moves != old.moves {
-			return false
-		}
-		n = n.parent
-	}
-	return n == nil
+	return *loc == locate(n)
 }
 
 // startListing is called before a directory read whose entries observe
@@ -689,6 +701,11 @@ func (t *nodeTable) ensure(p string, listed *node, derive bool) (id uint64, unli
 	if d == nil {
 		return 0, nil
 	}
+	return t.ensureChild(d, name, listed, derive)
+}
+
+// ensureChild is ensure's resident-parent path; the table mutex is held.
+func (t *nodeTable) ensureChild(d *node, name string, listed *node, derive bool) (uint64, *node) {
 	t.touch(d)
 	if k := d.kids[name]; k != nil {
 		return k.id, nil
@@ -936,12 +953,55 @@ func (t *nodeTable) install(d *node, gen uint64, infos []os.FileInfo) bool {
 	if !t.loadCold(d) || t.byID[d.id] != d || s.gen != gen || !location.holds(d) {
 		return false
 	}
+	count := len(s.entries)
+	for _, names := range s.dups {
+		count += len(names) - 1
+	}
+	unchanged := s.entries != nil && count == len(infos)
+	var newBytes int
+	for _, info := range infos {
+		name := info.Name()
+		if s.listedName(name) == "" {
+			unchanged = false
+			if s.leaves[nameHash(name)] != name && d.kids[name] == nil {
+				newBytes += len(name)
+			}
+		}
+	}
+	if unchanged {
+		return true
+	}
+	oldEntries, oldDups := s.entries, s.dups
+	var names strings.Builder
+	packNames := s.names == "" && newBytes != 0
+	if packNames {
+		names.Grow(newBytes)
+	}
 	t.charge(d, -s.listBytes())
 	s.entries, s.dups = make(map[uint32]string, len(infos)), nil
 	for _, info := range infos {
-		// A FileInfo's name may slice the whole path it was statted by.
-		name := strings.Clone(info.Name())
+		name := info.Name()
 		h := nameHash(name)
+		old := oldEntries[h]
+		if old == ambiguous {
+			if i := slices.Index(oldDups[h], name); i >= 0 {
+				old = oldDups[h][i]
+			}
+		}
+		switch {
+		case old == name:
+			name = old
+		case s.leaves[h] == name:
+			name = s.leaves[h]
+		case d.kids[name] != nil:
+			name = d.kids[name].name
+		case packNames:
+			at := names.Len()
+			names.WriteString(name)
+			name = names.String()[at:]
+		default:
+			name = strings.Clone(name)
+		}
 		prev, ok := s.entries[h]
 		if !ok {
 			s.entries[h] = name
@@ -956,8 +1016,24 @@ func (t *nodeTable) install(d *node, gen uint64, infos []os.FileInfo) bool {
 		}
 		s.dups[h] = append(s.dups[h], name)
 	}
+	if packNames {
+		s.names = names.String()
+		t.charge(d, int64(len(s.names)))
+	}
 	t.charge(d, s.listBytes())
 	return true
+}
+
+// listedName returns a listing's owned spelling, including colliding names.
+func (s *dirState) listedName(name string) string {
+	h := nameHash(name)
+	if s.entries[h] == name {
+		return s.entries[h]
+	}
+	if i := slices.Index(s.dups[h], name); i >= 0 {
+		return s.dups[h][i]
+	}
+	return ""
 }
 
 // appeared records that name became an entry of d under the mutex.
@@ -1082,7 +1158,8 @@ func (t *nodeTable) child(d *node, name string) *node {
 	}
 
 	h := nameHash(name)
-	k := &node{id: derivedID(d.key, h), name: d.dir.leaves[h], parent: d}
+	// A materialized/held child can outlive the directory's name arena.
+	k := &node{id: derivedID(d.key, h), name: strings.Clone(d.dir.leaves[h]), parent: d}
 	t.charge(d, -int64(64+len(k.name)))
 	delete(d.dir.leaves, h)
 	if len(d.dir.leaves) == 0 {

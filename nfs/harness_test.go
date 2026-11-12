@@ -67,6 +67,11 @@ func (f *testFS) FileID(p string) uint64 {
 	return id
 }
 
+// ChildID gives listed names the same identities as direct lookup.
+func (f *testFS) ChildID(dir, name string) uint64 {
+	return f.FileID(path.Join(dir, name))
+}
+
 // Path resolves a live id.
 func (f *testFS) Path(id uint64) (string, bool) {
 	f.mu.Lock()

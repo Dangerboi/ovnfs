@@ -281,8 +281,8 @@ func TestTouchedSurvivesStop(t *testing.T) {
 	if !fresh.Touched.Equal(fresh.Created) {
 		t.Fatalf("fresh checkout touched %v, created %v", fresh.Touched, fresh.Created)
 	}
-	s, err := f.reg.Enter("c")
-	if err != nil {
+	var s Session
+	if err := f.reg.Enter("c", &s); err != nil {
 		t.Fatal(err)
 	}
 	s.Touch()

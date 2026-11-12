@@ -71,12 +71,13 @@ func filetimeOf(ticks uint64) syscall.Filetime {
 // listing lacks, so each is described by os.Lstat; its failure becomes that
 // entry's error.
 func (s *session) readDir(path string) ([]os.DirEntry, error) {
+	s.dir = path
 	h, err := s.openDir(path)
 	if err != nil {
 		return nil, err
 	}
 	defer closeHandle(h)
-	s.entries = s.entries[:0]
+	s.entries = nil
 	if err := s.list(h, metadataDetail, 0); err != nil {
 		return nil, err
 	}
@@ -86,9 +87,7 @@ func (s *session) readDir(path string) ([]os.DirEntry, error) {
 // addMetadata appends the entry of one FILE_DIRECTORY_INFORMATION record to
 // s.entries. name is its WTF-8 name, so unpaired surrogates survive; os.Lstat
 // of such a name (reparse entries only) fails and is reported per entry.
-func (s *session) addMetadata(rec []byte, wname []uint16, attrs uint32) {
-	s.cname = appendWTF8(s.cname[:0], wname)
-	name := string(s.cname)
+func (s *session) addMetadata(rec []byte, name string, attrs uint32, slab *[]winInfo) {
 	if attrs&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		path := s.dir
 		if n := len(path); n > 0 && path[n-1] != '\\' && path[n-1] != '/' {
@@ -105,12 +104,15 @@ func (s *session) addMetadata(rec []byte, wname []uint16, attrs uint32) {
 		return
 	}
 	size := binary.LittleEndian.Uint64(rec[fdiEndOfFile:])
-	s.entries = append(s.entries, &winInfo{name: name, data: syscall.Win32FileAttributeData{
+	*slab = (*slab)[:len(*slab)+1]
+	info := &(*slab)[len(*slab)-1]
+	*info = winInfo{name: name, data: syscall.Win32FileAttributeData{
 		FileAttributes: attrs,
 		CreationTime:   filetimeOf(binary.LittleEndian.Uint64(rec[fdiCreationTime:])),
 		LastAccessTime: filetimeOf(binary.LittleEndian.Uint64(rec[fdiLastAccessTime:])),
 		LastWriteTime:  filetimeOf(binary.LittleEndian.Uint64(rec[fdiLastWriteTime:])),
 		FileSizeHigh:   uint32(size >> 32),
 		FileSizeLow:    uint32(size),
-	}})
+	}}
+	s.entries = append(s.entries, info)
 }

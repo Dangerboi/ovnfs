@@ -201,7 +201,8 @@ func (t *nodeTable) addLogged(d *node, delta int64) {
 	t.account(d, delta)
 }
 
-// listBytes estimates the listing's maps, duplicate slices and cloned names.
+// listBytes estimates listing maps and names. The shared name arena remains
+// separately charged until eviction, even when invalidation drops the listing.
 func (s *dirState) listBytes() int64 {
 	var n int64
 	for _, name := range s.entries {
@@ -303,6 +304,7 @@ func (t *nodeTable) trimCache() {
 		}
 		s.gen++ // an in-flight listing must not resurrect the evicted snapshot
 		s.entries, s.dups, s.leaves = nil, nil, nil
+		s.names = ""
 		s.coldLoaded = false
 		for name, k := range d.kids {
 			if k.key == 0 && k.holds == 0 {

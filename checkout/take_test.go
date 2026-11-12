@@ -171,8 +171,8 @@ func TestTakeOrderingModesAndProtectedPaths(t *testing.T) {
 			t.Errorf("%s = %q, want %q", p, got, want)
 		}
 	}
-	s, err := f.reg.Enter("ordered")
-	if err != nil {
+	var s Session
+	if err := f.reg.Enter("ordered", &s); err != nil {
 		t.Fatal(err)
 	}
 	defer s.Done()

@@ -340,7 +340,7 @@ func (f *FS) readDir(p string) ([]os.FileInfo, error) {
 		if err != nil {
 			return nil, err
 		}
-		return f.sortedVisible(items), nil
+		return visibleEntries(items), nil
 	}
 	_, info, err := f.lookup(p)
 	if err != nil {
@@ -429,26 +429,18 @@ func (l *Layer) untouched(p string) bool {
 	return !present && len(l.children[p]) == 0 && !l.barrier(p)
 }
 
-// sortedVisible returns a fresh, exact-size, name-ordered copy of items without
-// reserved whiteout names. The Bottom contract gives callers no ownership of
-// its slice, so it is never returned directly.
-func (f *FS) sortedVisible(items []os.FileInfo) []os.FileInfo {
-	n := 0
-	for _, item := range items {
-		if !strings.HasPrefix(item.Name(), whPrefix) {
-			n++
-		}
+// visibleEntries filters reserved names in the bottom's caller-owned listing.
+func visibleEntries(items []os.FileInfo) []os.FileInfo {
+	if items == nil {
+		return []os.FileInfo{}
 	}
-	out := make([]os.FileInfo, 0, n)
+	out := items[:0]
 	for _, item := range items {
 		if !strings.HasPrefix(item.Name(), whPrefix) {
 			out = append(out, item)
 		}
 	}
-	byName := func(a, b os.FileInfo) int { return strings.Compare(a.Name(), b.Name()) }
-	if !slices.IsSortedFunc(out, byName) {
-		slices.SortFunc(out, byName)
-	}
+	clear(items[len(out):])
 	return out
 }
 

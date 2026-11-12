@@ -17,6 +17,9 @@ type Backend interface {
 	// FileID returns p's stable id, allocating one on first use. File handles
 	// and fileids carry it, so it must follow p across renames.
 	FileID(p string) uint64
+	// ChildID identifies one basename under clean directory dir without
+	// requiring callers to construct a complete child path.
+	ChildID(dir, name string) uint64
 	// Path returns the current path of a live id; false makes the id's
 	// handles stale.
 	Path(id uint64) (string, bool)

@@ -145,8 +145,8 @@ func (f *fixture) ls() api.LsReply {
 // read returns a checkout file's content, or "<absent>".
 func (f *fixture) read(checkout, p string) string {
 	f.t.Helper()
-	s, err := f.reg.Enter(checkout)
-	if err != nil {
+	var s Session
+	if err := f.reg.Enter(checkout, &s); err != nil {
 		f.t.Fatal(err)
 	}
 	defer s.Done()
@@ -168,8 +168,8 @@ func (f *fixture) read(checkout, p string) string {
 // put writes a checkout file through the overlay, as an agent's editor would.
 func (f *fixture) put(checkout, p, data string) {
 	f.t.Helper()
-	s, err := f.reg.Enter(checkout)
-	if err != nil {
+	var s Session
+	if err := f.reg.Enter(checkout, &s); err != nil {
 		f.t.Fatal(err)
 	}
 	defer s.Done()
@@ -191,8 +191,8 @@ func (f *fixture) put(checkout, p, data string) {
 // remove deletes a checkout path through the overlay.
 func (f *fixture) remove(checkout, p string) {
 	f.t.Helper()
-	s, err := f.reg.Enter(checkout)
-	if err != nil {
+	var s Session
+	if err := f.reg.Enter(checkout, &s); err != nil {
 		f.t.Fatal(err)
 	}
 	defer s.Done()
@@ -559,6 +559,64 @@ func TestRepoCheckoutAndPlan(t *testing.T) {
 	}
 }
 
+// TestSessionDoneConcurrentAndReuse checks that caller-owned storage releases
+// exactly once, remains safe on failed Enter, and pins a new checkout on reuse.
+func TestSessionDoneConcurrentAndReuse(t *testing.T) {
+	f := newFixture(t)
+	dir := folder(t, map[string]string{"file": "base"})
+	f.newCheckout(dir, "first")
+	f.newCheckout(dir, "second")
+	var s Session
+	s.Done()
+	(*Session)(nil).Done()
+	defer s.Done()
+	for _, name := range []string{"first", "second"} {
+		if err := f.reg.Enter(name, &s); err != nil {
+			t.Fatal(err)
+		}
+		h := s.record
+		if h.freeze.TryLock() {
+			h.freeze.Unlock()
+			t.Fatal("session did not pin its checkout")
+		}
+		start := make(chan struct{})
+		var calls sync.WaitGroup
+		for range 16 {
+			calls.Go(func() {
+				<-start
+				s.Done()
+			})
+		}
+		close(start)
+		calls.Wait()
+		s.Done()
+		if !h.freeze.TryLock() {
+			t.Fatal("Done did not release the checkout")
+		}
+		h.freeze.Unlock()
+		if err := f.reg.Enter("missing", &s); !isCode(err, "not_found") {
+			t.Fatalf("missing checkout = %v", err)
+		}
+		s.Done()
+	}
+}
+
+// TestSessionEnterDoesNotAllocate guards the per-file-call ownership contract.
+func TestSessionEnterDoesNotAllocate(t *testing.T) {
+	f := newFixture(t)
+	f.newCheckout(folder(t, map[string]string{"file": "base"}), "app")
+	allocs := testing.AllocsPerRun(1000, func() {
+		var s Session
+		if err := f.reg.Enter("app", &s); err != nil {
+			t.Fatal(err)
+		}
+		s.Done()
+	})
+	if allocs != 0 {
+		t.Fatalf("Enter/Done allocated %g objects per call", allocs)
+	}
+}
+
 // TestFreezeWaitsOutsideRegistryLock checks that snap, fork and rm wait out a
 // checkout's file calls without the registry lock, so a slow call stalls only
 // its own checkout and every other one keeps serving.
@@ -580,8 +638,8 @@ func TestFreezeWaitsOutsideRegistryLock(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			f.newCheckout(dir, tt.name)
-			call, err := f.reg.Enter(tt.name) // a slow file call in flight
-			if err != nil {
+			var call Session // a slow file call in flight
+			if err := f.reg.Enter(tt.name, &call); err != nil {
 				t.Fatal(err)
 			}
 			f.reg.mu.RLock()
@@ -606,7 +664,8 @@ func TestFreezeWaitsOutsideRegistryLock(t *testing.T) {
 			}
 			entered := make(chan error, 1)
 			go func() {
-				s, err := f.reg.Enter("other")
+				var s Session
+				err := f.reg.Enter("other", &s)
 				if err == nil {
 					s.Done()
 				}

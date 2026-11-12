@@ -97,7 +97,7 @@ type Base struct {
 	capture   *source.Result
 	domains   *source.Domains
 	sources   map[string]entry
-	children  map[string][]string
+	children  map[string][]string // sorted root-relative paths, borrowed from sources
 	classes   map[string]rules.Class
 	objectsMu sync.Mutex
 	objects   map[string]*git.Objects // object readers by work tree top
@@ -246,7 +246,7 @@ func load(c Config, m Meta, res *source.Result) (*Base, error) {
 			if parent == "." {
 				parent = ""
 			}
-			b.children[parent] = append(b.children[parent], path.Base(p))
+			b.children[parent] = append(b.children[parent], p)
 		}
 	}
 	if m.Remote != nil {

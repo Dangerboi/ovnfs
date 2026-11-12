@@ -44,8 +44,8 @@ func (f *fixture) export(checkout string) string {
 	if err := os.RemoveAll(dst); err != nil {
 		f.t.Fatal(err)
 	}
-	s, err := f.reg.Enter(checkout)
-	if err != nil {
+	var s Session
+	if err := f.reg.Enter(checkout, &s); err != nil {
 		f.t.Fatal(err)
 	}
 	defer s.Done()
@@ -71,7 +71,7 @@ func (f *fixture) export(checkout string) string {
 				}
 			default:
 				var data []byte
-				if data, err = readAll(s, child); err == nil {
+				if data, err = readAll(&s, child); err == nil {
 					err = os.WriteFile(host, data, info.Mode().Perm())
 				}
 			}
@@ -201,11 +201,11 @@ func TestSubmoduleMovedInFork(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 	f.newCheckout(submoduleRepo(t), "app")
-	s, err := f.reg.Enter("app")
-	if err != nil {
+	var s Session
+	if err := f.reg.Enter("app", &s); err != nil {
 		t.Fatal(err)
 	}
-	err = s.FS.Rename("vendor/sub", "vendor/moved")
+	err := s.FS.Rename("vendor/sub", "vendor/moved")
 	s.Done()
 	if err != nil {
 		t.Fatal(err)
@@ -358,11 +358,11 @@ func TestSubmoduleDirMetadataIsAChange(t *testing.T) {
 		if f.dirty(name) {
 			t.Fatalf("%s: a fresh checkout reports changes", name)
 		}
-		s, err := f.reg.Enter(name)
-		if err != nil {
+		var s Session
+		if err := f.reg.Enter(name, &s); err != nil {
 			t.Fatal(err)
 		}
-		err = change(s)
+		err := change(&s)
 		s.Done()
 		if err != nil {
 			t.Fatal(err)

@@ -2,8 +2,6 @@ package nfs
 
 import (
 	"os"
-	"slices"
-	"strings"
 	"sync"
 )
 
@@ -78,7 +76,6 @@ func (s *Server) read(id uint64, p string, first uint64) (*listing, status) {
 	if err != nil {
 		return nil, statusOf(err)
 	}
-	slices.SortFunc(infos, func(a, b os.FileInfo) int { return strings.Compare(a.Name(), b.Name()) })
 	return &listing{dir: id, verf: verifier(id, first, infos), first: first, entries: infos}, stOK
 }
 

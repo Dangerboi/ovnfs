@@ -4,6 +4,7 @@ package base
 
 import (
 	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -31,8 +32,8 @@ func volumeID(p string) (uint64, error) {
 }
 
 // fileIdentity combines a volume serial and native file index to tell one file from a lookalike.
-func fileIdentity(_ os.FileInfo, p string) (uint64, uint64, error) {
-	h, err := metadataHandle(p, windows.FILE_READ_ATTRIBUTES)
+func fileIdentity(_ os.FileInfo, root, p string) (uint64, uint64, error) {
+	h, err := metadataHandle(filepath.Join(root, filepath.FromSlash(p)), windows.FILE_READ_ATTRIBUTES)
 	if err != nil {
 		return 0, 0, err
 	}

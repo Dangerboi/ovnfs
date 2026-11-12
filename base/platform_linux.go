@@ -21,7 +21,7 @@ func volumeID(p string) (uint64, error) {
 }
 
 // fileIdentity returns the device and inode that tell one file from a lookalike.
-func fileIdentity(info os.FileInfo, _ string) (uint64, uint64, error) {
+func fileIdentity(info os.FileInfo, _, _ string) (uint64, uint64, error) {
 	s := info.Sys().(*syscall.Stat_t)
 	return uint64(s.Dev), uint64(s.Ino), nil
 }

@@ -75,15 +75,15 @@ func splitRouterPath(name string) (string, string) {
 }
 
 // enter translates registry lookup errors to filesystem errors.
-func (r *Router) enter(co, op, name string) (*checkout.Session, error) {
-	s, err := r.reg.Enter(co)
+func (r *Router) enter(co, op, name string, s *checkout.Session) error {
+	err := r.reg.Enter(co, s)
 	if err != nil {
 		var e *checkout.Error
 		if errors.As(err, &e) && e.Code == "not_found" {
-			return nil, &fs.PathError{Op: op, Path: name, Err: fs.ErrNotExist}
+			return &fs.PathError{Op: op, Path: name, Err: fs.ErrNotExist}
 		}
 	}
-	return s, err
+	return err
 }
 
 // routerDenied reports a mutation that would change the export's checkout entries.
@@ -98,8 +98,8 @@ func (r *Router) mutate(op, name string, fn func(*overlay.FS, string) error) err
 	if co == "" || p == "" {
 		return routerDenied(op, name)
 	}
-	s, err := r.enter(co, op, name)
-	if err != nil {
+	var s checkout.Session
+	if err := r.enter(co, op, name, &s); err != nil {
 		return err
 	}
 	defer s.Done()
@@ -122,7 +122,8 @@ func (r *Router) Open(name string) (billy.File, error) {
 
 // OpenFile opens a checkout file and keeps future calls on its current generation.
 func (r *Router) OpenFile(name string, flag int, perm os.FileMode) (billy.File, error) {
-	co, p := splitRouterPath(name)
+	canonical := overlay.Clean(name)
+	co, p, _ := strings.Cut(canonical, "/")
 	if flag&routerWriteFlags != 0 && p == "" {
 		return nil, routerDenied("open", name)
 	}
@@ -132,8 +133,8 @@ func (r *Router) OpenFile(name string, flag int, perm os.FileMode) (billy.File, 
 	if marker(co, p) {
 		return markerFile{&rootFile{router: r, name: name}}, nil
 	}
-	s, err := r.enter(co, "open", name)
-	if err != nil {
+	var s checkout.Session
+	if err := r.enter(co, "open", name, &s); err != nil {
 		return nil, err
 	}
 	defer s.Done()
@@ -144,7 +145,7 @@ func (r *Router) OpenFile(name string, flag int, perm os.FileMode) (billy.File, 
 	if flag&(os.O_CREATE|os.O_TRUNC) != 0 {
 		s.Touch()
 	}
-	return &routerFile{router: r, co: co, path: p, flags: flag, perm: perm, gen: s.Gen, file: f, life: r.life(co)}, nil
+	return &routerFile{router: r, co: co, path: p, name: canonical, flags: flag, perm: perm, gen: s.Gen, file: f, life: r.life(co)}, nil
 }
 
 // Stat returns current attributes, following the final symlink within its checkout.
@@ -166,7 +167,8 @@ func (r *Router) info(name string, nofollow bool) (os.FileInfo, error) {
 	if marker(co, p) {
 		return markerInfo{mtime: r.reg.RootTime()}, nil
 	}
-	s, err := r.enter(co, "stat", name)
+	var s checkout.Session
+	err := r.enter(co, "stat", name, &s)
 	if err != nil {
 		return nil, err
 	}
@@ -202,8 +204,8 @@ func (r *Router) ReadDir(name string) ([]os.FileInfo, error) {
 		}
 		return out, nil
 	}
-	s, err := r.enter(co, "readdir", name)
-	if err != nil {
+	var s checkout.Session
+	if err := r.enter(co, "readdir", name, &s); err != nil {
 		return nil, err
 	}
 	defer s.Done()
@@ -216,8 +218,8 @@ func (r *Router) TempFile(dir, prefix string) (billy.File, error) {
 	if co == "" {
 		return nil, routerDenied("tempfile", dir)
 	}
-	s, err := r.enter(co, "tempfile", dir)
-	if err != nil {
+	var s checkout.Session
+	if err := r.enter(co, "tempfile", dir, &s); err != nil {
 		return nil, err
 	}
 	defer s.Done()
@@ -226,7 +228,8 @@ func (r *Router) TempFile(dir, prefix string) (billy.File, error) {
 		return nil, err
 	}
 	s.Touch()
-	return &routerFile{router: r, co: co, path: overlay.Clean(f.Name()), flags: os.O_RDWR, perm: 0o600, gen: s.Gen, file: f, life: r.life(co)}, nil
+	p = overlay.Clean(f.Name())
+	return &routerFile{router: r, co: co, path: p, name: path.Join(co, p), flags: os.O_RDWR, perm: 0o600, gen: s.Gen, file: f, life: r.life(co)}, nil
 }
 
 // MkdirAll creates directories below a checkout's root.
@@ -253,8 +256,8 @@ func (r *Router) Rename(oldname, newname string) error {
 	}
 	if oldco != newco {
 		for _, co := range []string{oldco, newco} {
-			s, err := r.enter(co, "rename", oldname)
-			if err != nil {
+			var s checkout.Session
+			if err := r.enter(co, "rename", oldname, &s); err != nil {
 				return err
 			}
 			s.Done()
@@ -273,8 +276,8 @@ func (r *Router) Link(oldname, newname string) error {
 	}
 	if oldco != newco {
 		for _, co := range []string{oldco, newco} {
-			s, err := r.enter(co, "link", oldname)
-			if err != nil {
+			var s checkout.Session
+			if err := r.enter(co, "link", oldname, &s); err != nil {
 				return err
 			}
 			s.Done()
@@ -295,8 +298,8 @@ func (r *Router) Readlink(name string) (string, error) {
 	if co == "" || marker(co, p) {
 		return "", &fs.PathError{Op: "readlink", Path: name, Err: syscall.EINVAL}
 	}
-	s, err := r.enter(co, "readlink", name)
-	if err != nil {
+	var s checkout.Session
+	if err := r.enter(co, "readlink", name, &s); err != nil {
 		return "", err
 	}
 	defer s.Done()

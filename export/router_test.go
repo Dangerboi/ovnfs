@@ -101,8 +101,8 @@ func TestRouterRootListsCheckoutAttributes(t *testing.T) {
 	var names []string
 	for _, entry := range entries {
 		names = append(names, entry.Name())
-		s, err := reg.Enter(entry.Name())
-		if err != nil {
+		var s checkout.Session
+		if err := reg.Enter(entry.Name(), &s); err != nil {
 			t.Fatal(err)
 		}
 		real, err := s.FS.Lstat("")
@@ -393,11 +393,14 @@ func TestRouterRemovedHandlesStayClosed(t *testing.T) {
 // TestRouterReadHandlePreservesOffset checks ReadAt does not perturb a later generation's seek.
 func TestRouterReadHandlePreservesOffset(t *testing.T) {
 	reg, rt := routerFixture(t, "alpha")
-	f, err := rt.Open("alpha/source")
+	f, err := rt.Open("/alpha/./source")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
+	if got := f.Name(); got != "alpha/source" {
+		t.Fatalf("canonical handle name = %q", got)
+	}
 	prefix := make([]byte, 2)
 	if _, err := io.ReadFull(f, prefix); err != nil || string(prefix) != "ba" {
 		t.Fatalf("initial read = %q, %v", prefix, err)

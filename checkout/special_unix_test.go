@@ -16,8 +16,8 @@ import (
 func TestSpecialNodesStayOutOfTrees(t *testing.T) {
 	f := newFixture(t)
 	f.newCheckout(folder(t, map[string]string{"x": "1", "gone": "2"}), "c")
-	s, err := f.reg.Enter("c")
-	if err != nil {
+	var s Session
+	if err := f.reg.Enter("c", &s); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.FS.Remove("gone"); err != nil {

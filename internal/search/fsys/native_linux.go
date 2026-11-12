@@ -7,6 +7,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -99,6 +101,17 @@ func (s *session) list(h handle, detail Detail, _ uint32) error {
 		if n <= 0 {
 			return nil
 		}
+		var names strings.Builder
+		var slab []nativeInfo
+		if detail == metadataDetail {
+			nameBytes, entries, err := metadataBatchSize(buf[:n])
+			if err != nil {
+				return err
+			}
+			names.Grow(nameBytes)
+			slab = make([]nativeInfo, 0, entries)
+			s.entries = slices.Grow(s.entries, entries)
+		}
 		var next int64
 		for off := 0; off+direntName <= n; {
 			rec := buf[off:n]
@@ -124,7 +137,9 @@ func (s *session) list(h handle, detail Detail, _ uint32) error {
 			}
 			dt := rec[direntType]
 			if detail == metadataDetail {
-				s.entries = append(s.entries, s.metadataEntry(h, cname, dt))
+				start := names.Len()
+				names.Write(name)
+				s.entries = append(s.entries, s.metadataEntry(h, cname, dt, names.String()[start:], &slab))
 				continue
 			}
 			typ := typeFromDT(dt)
@@ -304,12 +319,38 @@ func (s *session) readDir(path string) ([]os.DirEntry, error) {
 	return s.entries, nil
 }
 
+// metadataBatchSize sizes compact, independently owned name and stat slabs.
+// Names are validated with the same rules as the getdents loop.
+func metadataBatchSize(buf []byte) (nameBytes, entries int, err error) {
+	for off := 0; off+direntName <= len(buf); {
+		rec := buf[off:]
+		reclen := int(*(*uint16)(unsafe.Pointer(&rec[direntReclen])))
+		if reclen < direntName || reclen > len(rec) {
+			return 0, 0, unix.EIO
+		}
+		off += reclen
+		if *(*uint64)(unsafe.Pointer(&rec[direntIno])) == 0 {
+			continue
+		}
+		i := bytes.IndexByte(rec[direntName:reclen], 0)
+		if i < 0 {
+			return 0, 0, unix.EIO
+		}
+		if i != 0 && !isDotOrDotDot(rec[direntName:direntName+i]) {
+			nameBytes += i
+			entries++
+		}
+	}
+	return nameBytes, entries, nil
+}
+
 // metadataEntry lstats the NUL-terminated cname relative to dir into a
 // complete nativeInfo, or reports the failure with the type d_type gave.
-func (s *session) metadataEntry(dir handle, cname []byte, dt byte) os.DirEntry {
-	name := string(cname[:len(cname)-1])
-	info := &nativeInfo{name: name}
+func (s *session) metadataEntry(dir handle, cname []byte, dt byte, name string, slab *[]nativeInfo) os.DirEntry {
+	info := newInfo(slab)
+	info.name = name
 	if err := fstatat(dir, cname, &info.st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		dropInfo(slab)
 		return failedEntry{name: name, typ: dtMode(dt), err: &os.PathError{Op: "lstat", Path: filepath.Join(s.dir, name), Err: err}}
 	}
 	info.mode = modeFromStat(uint32(info.st.Mode))

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stencil-hq/ovnfs/checkout"
 	"github.com/stencil-hq/ovnfs/overlay"
 )
 
@@ -36,8 +37,8 @@ func TestSMBNativeMetadata(t *testing.T) {
 
 			nativeInfo := func(name string) os.FileInfo {
 				t.Helper()
-				s, err := f.reg.Enter("agent")
-				if err != nil {
+				var s checkout.Session
+				if err := f.reg.Enter("agent", &s); err != nil {
 					t.Fatal(err)
 				}
 				info, err := s.FS.Lstat(name)

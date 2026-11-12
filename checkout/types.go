@@ -244,24 +244,24 @@ type layerRecord struct {
 type baseNotice struct{ base, fault string }
 
 // Session holds a checkout's freeze lock shared for exactly one filesystem call.
+// Its caller owns the storage and must not copy it after passing it to Enter.
+// FS and Gen are valid until Done. Reuse is allowed only after all calls using
+// the session, including concurrent Done calls, have returned.
 type Session struct {
 	FS     *overlay.FS
 	Gen    uint64
 	record *checkoutRecord
-	once   sync.Once
+	done   atomic.Bool
 }
 
 // Touch records that the call changed the checkout, for [api.Checkout.Touched].
 func (s *Session) Touch() { s.record.wrote.Store(time.Now().UnixNano()) }
 
-// Done releases the freeze lock; repeated calls are harmless.
+// Done releases the freeze lock; repeated and concurrent calls are harmless.
+// A nil or zero Session has nothing to release.
 func (s *Session) Done() {
-	if s != nil {
-		s.once.Do(func() {
-			if s.record != nil {
-				s.record.freeze.RUnlock()
-			}
-		})
+	if s != nil && s.record != nil && s.done.CompareAndSwap(false, true) {
+		s.record.freeze.RUnlock()
 	}
 }
 

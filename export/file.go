@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path"
 	"sync"
 
 	"github.com/go-git/go-billy/v5"
@@ -17,6 +16,7 @@ type routerFile struct {
 	router *Router
 	co     string
 	path   string
+	name   string
 	flags  int
 	perm   os.FileMode
 	gen    uint64
@@ -30,53 +30,52 @@ type routerFile struct {
 var _ billy.File = (*routerFile)(nil)
 
 // current holds the freeze lock and replaces a stale descriptor before any I/O.
-// The caller holds mu and must release the returned session after its operation.
-func (f *routerFile) current(op string) (*checkout.Session, error) {
+// The caller holds mu and owns s, releasing it after its I/O if current succeeds.
+func (f *routerFile) current(op string, s *checkout.Session) error {
 	if f.closed || f.life.retired.Load() {
-		return nil, &os.PathError{Op: op, Path: f.Name(), Err: os.ErrClosed}
+		return &os.PathError{Op: op, Path: f.Name(), Err: os.ErrClosed}
 	}
-	s, err := f.router.enter(f.co, op, f.Name())
-	if err != nil {
+	if err := f.router.enter(f.co, op, f.Name(), s); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, &os.PathError{Op: op, Path: f.Name(), Err: os.ErrClosed}
+			return &os.PathError{Op: op, Path: f.Name(), Err: os.ErrClosed}
 		}
-		return nil, err
+		return err
 	}
 	if f.life.retired.Load() {
 		s.Done()
-		return nil, &os.PathError{Op: op, Path: f.Name(), Err: os.ErrClosed}
+		return &os.PathError{Op: op, Path: f.Name(), Err: os.ErrClosed}
 	}
 	if s.Gen == f.gen {
-		return s, nil
+		return nil
 	}
 	// Creation and truncation are one-time open effects, never replayed at a freeze.
 	flags := f.flags &^ (os.O_CREATE | os.O_EXCL | os.O_TRUNC)
 	next, err := s.FS.OpenFile(f.path, flags, f.perm)
 	if err != nil {
 		s.Done()
-		return nil, err
+		return err
 	}
 	if _, err := next.Seek(f.offset, io.SeekStart); err != nil {
 		next.Close()
 		s.Done()
-		return nil, err
+		return err
 	}
 	old := f.file
 	f.file = next
 	f.gen = s.Gen
 	old.Close()
-	return s, nil
+	return nil
 }
 
 // Name returns the file's canonical export-relative path.
-func (f *routerFile) Name() string { return path.Join(f.co, f.path) }
+func (f *routerFile) Name() string { return f.name }
 
 // Read reads at the wrapper's current offset from the current checkout generation.
 func (f *routerFile) Read(p []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s, err := f.current("read")
-	if err != nil {
+	var s checkout.Session
+	if err := f.current("read", &s); err != nil {
 		return 0, err
 	}
 	defer s.Done()
@@ -89,8 +88,8 @@ func (f *routerFile) Read(p []byte) (int, error) {
 func (f *routerFile) ReadAt(p []byte, off int64) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s, err := f.current("readat")
-	if err != nil {
+	var s checkout.Session
+	if err := f.current("readat", &s); err != nil {
 		return 0, err
 	}
 	defer s.Done()
@@ -101,8 +100,8 @@ func (f *routerFile) ReadAt(p []byte, off int64) (int, error) {
 func (f *routerFile) Write(p []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s, err := f.current("write")
-	if err != nil {
+	var s checkout.Session
+	if err := f.current("write", &s); err != nil {
 		return 0, err
 	}
 	defer s.Done()
@@ -125,8 +124,8 @@ func (f *routerFile) Write(p []byte) (int, error) {
 func (f *routerFile) WriteAt(p []byte, off int64) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s, err := f.current("writeat")
-	if err != nil {
+	var s checkout.Session
+	if err := f.current("writeat", &s); err != nil {
 		return 0, err
 	}
 	defer s.Done()
@@ -149,8 +148,8 @@ func (f *routerFile) WriteAt(p []byte, off int64) (int, error) {
 func (f *routerFile) Sync() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s, err := f.current("sync")
-	if err != nil {
+	var s checkout.Session
+	if err := f.current("sync", &s); err != nil {
 		return err
 	}
 	defer s.Done()
@@ -164,8 +163,8 @@ func (f *routerFile) Sync() error {
 func (f *routerFile) Seek(offset int64, whence int) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s, err := f.current("seek")
-	if err != nil {
+	var s checkout.Session
+	if err := f.current("seek", &s); err != nil {
 		return 0, err
 	}
 	defer s.Done()
@@ -180,8 +179,8 @@ func (f *routerFile) Seek(offset int64, whence int) (int64, error) {
 func (f *routerFile) Truncate(size int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s, err := f.current("truncate")
-	if err != nil {
+	var s checkout.Session
+	if err := f.current("truncate", &s); err != nil {
 		return err
 	}
 	defer s.Done()
@@ -193,8 +192,8 @@ func (f *routerFile) Truncate(size int64) error {
 func (f *routerFile) Lock() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s, err := f.current("lock")
-	if err != nil {
+	var s checkout.Session
+	if err := f.current("lock", &s); err != nil {
 		return err
 	}
 	defer s.Done()
@@ -205,8 +204,8 @@ func (f *routerFile) Lock() error {
 func (f *routerFile) Unlock() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s, err := f.current("unlock")
-	if err != nil {
+	var s checkout.Session
+	if err := f.current("unlock", &s); err != nil {
 		return err
 	}
 	defer s.Done()
@@ -217,8 +216,8 @@ func (f *routerFile) Unlock() error {
 func (f *routerFile) Stat() (os.FileInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s, err := f.current("stat")
-	if err != nil {
+	var s checkout.Session
+	if err := f.current("stat", &s); err != nil {
 		return nil, err
 	}
 	defer s.Done()

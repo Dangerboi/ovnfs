@@ -273,16 +273,15 @@ func TestCheckoutRetirementLeavesOtherIdentitiesLive(t *testing.T) {
 	}
 }
 
-// TestDeepPathsAndLocations protects paths and location snapshots deeper than
-// both the inline snapshot and the stack used to build paths.
+// TestDeepPathsAndLocations protects deep paths and exact relocation stamps.
 func TestDeepPathsAndLocations(t *testing.T) {
-	parts := make([]string, pathStack+inlineDepth)
+	parts := make([]string, pathStack*2)
 	for i := range parts {
 		parts[i] = fmt.Sprintf("d%d", i)
 	}
 	dir := strings.Join(parts, "/")
 	file := dir + "/file"
-	ns := newNamespace(file)
+	ns := newNamespace(file, "other/file")
 	nt := newNodeTable(ns.list)
 	defer nt.close()
 	id := nt.id(file)
@@ -290,17 +289,32 @@ func TestDeepPathsAndLocations(t *testing.T) {
 		t.Fatalf("deep path = %q, want %q", got, file)
 	}
 
+	ns.move(dir, dir+"-moved")
+	nt.rename(dir, dir+"-moved")
+	ns.move(dir+"-moved", dir)
+	nt.rename(dir+"-moved", dir)
+	nt.id("other/file")
+
 	nt.mu.Lock()
 	d := nt.find(dir)
 	loc := locate(d)
 	same := loc.holds(d)
 	nt.mu.Unlock()
-	if d == nil || len(loc.deep) == 0 || !same {
-		t.Fatal("deep location did not snapshot or overflow")
+	if d == nil || !same {
+		t.Fatal("deep location did not snapshot")
 	}
 
-	// The top ancestor is the last overflow entry: moving it away and back
-	// must still be rejected, though every path matches again.
+	ns.move("other", "elsewhere")
+	nt.rename("other", "elsewhere")
+	nt.mu.Lock()
+	unrelated := loc.holds(d)
+	nt.mu.Unlock()
+	if !unrelated {
+		t.Fatal("unrelated relocation invalidated the directory")
+	}
+
+	// Moving a deep ancestor away and back must still be rejected,
+	// though every path matches again.
 	ns.move("d0", "away")
 	nt.rename("d0", "away")
 	ns.move("away", "d0")

@@ -18,18 +18,17 @@ import (
 
 // searchTarget is a resolved search root.
 type searchTarget struct {
-	root    string
-	walk    walk.Options
-	remote  grep.Remote // set for a checkout attached from another machine
-	release func()      // ends the checkout session
+	root   string
+	walk   walk.Options
+	remote grep.Remote // set for a checkout attached from another machine
 }
 
 // searchRoot resolves mounted checkout paths without accessing the network mount.
-// A checkout's freeze lock stays shared until release, after all search workers
+// The caller owns s and releases its shared freeze lock after all search workers
 // have stopped. A checkout attached from another machine first fetches the
 // ignore files the walk reads, in one batch, and grep scans the files it has
 // not fetched on that machine.
-func (r *Registry) searchRoot(ctx context.Context, args api.SearchArgs) (searchTarget, error) {
+func (r *Registry) searchRoot(ctx context.Context, args api.SearchArgs, s *Session) (searchTarget, error) {
 	wo := walk.Options{
 		Hidden: args.Hidden, Gitignore: !args.NoIgnore, SkipGit: true,
 		SkipNodeModules: !args.NodeModules, Workers: args.Workers, MaxDepth: args.MaxDepth,
@@ -57,15 +56,14 @@ func (r *Registry) searchRoot(ctx context.Context, args api.SearchArgs) (searchT
 			name, rest, _ = strings.Cut(filepath.ToSlash(rel), "/")
 			sub = path.Join(rest, sub)
 		} else {
-			return searchTarget{root: filepath.Join(dir, filepath.FromSlash(sub)), walk: wo, release: func() {}}, nil
+			return searchTarget{root: filepath.Join(dir, filepath.FromSlash(sub)), walk: wo}, nil
 		}
 	}
-	s, err := r.Enter(name)
-	if err != nil {
+	if err := r.Enter(name, s); err != nil {
 		return searchTarget{}, err
 	}
 	wo.FS, wo.Config = fsys.FromOverlay(s.FS), fsys.Native
-	t := searchTarget{root: path.Join("/", sub), walk: wo, release: s.Done}
+	t := searchTarget{root: path.Join("/", sub), walk: wo}
 	view := s.record.base.view
 	if remote := view.Meta().Remote; remote != nil {
 		if wo.Gitignore {
@@ -141,11 +139,12 @@ func (r *Registry) Grep(ctx context.Context, args api.GrepArgs) (api.GrepReply, 
 	if args.Before < 0 || args.After < 0 || args.MaxColumns < 0 || args.Offset < 0 || args.MaxCount < 0 || args.MaxCountPerFile < 0 || args.MaxFileSize < 0 {
 		return api.GrepReply{}, failure("invalid", "grep limits and context must not be negative")
 	}
-	t, err := r.searchRoot(ctx, args.SearchArgs)
+	var s Session
+	t, err := r.searchRoot(ctx, args.SearchArgs, &s)
 	if err != nil {
 		return api.GrepReply{}, err
 	}
-	defer t.release()
+	defer s.Done()
 	if err := checkContext(ctx); err != nil {
 		return api.GrepReply{}, err
 	}
@@ -202,11 +201,12 @@ func (r *Registry) Glob(ctx context.Context, args api.GlobArgs) (api.GlobReply, 
 	if args.Limit < 0 {
 		return api.GlobReply{}, failure("invalid", "glob limit must not be negative")
 	}
-	t, err := r.searchRoot(ctx, args.SearchArgs)
+	var s Session
+	t, err := r.searchRoot(ctx, args.SearchArgs, &s)
 	if err != nil {
 		return api.GlobReply{}, err
 	}
-	defer t.release()
+	defer s.Done()
 	if err := checkContext(ctx); err != nil {
 		return api.GlobReply{}, err
 	}

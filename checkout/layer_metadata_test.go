@@ -73,8 +73,8 @@ func TestSnapshotMetadataSharedState(t *testing.T) {
 		func() { f.put("app", "file", "edited") },
 		func() { f.remove("app", "gone") },
 		func() {
-			s, err := f.reg.Enter("app")
-			if err != nil {
+			var s Session
+			if err := f.reg.Enter("app", &s); err != nil {
 				t.Fatal(err)
 			}
 			defer s.Done()
@@ -130,8 +130,8 @@ func TestSnapshotMetadataSharedState(t *testing.T) {
 			t.Fatalf("snapshot %s: gone = %q, want %q", id, got, want)
 		}
 		if i == 2 {
-			s, err := f.reg.Enter(name)
-			if err != nil {
+			var s Session
+			if err := f.reg.Enter(name, &s); err != nil {
 				t.Fatal(err)
 			}
 			info, err := s.FS.Lstat("empty/nested")

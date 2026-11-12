@@ -15,7 +15,8 @@ import (
 // Bottom is the read-only filesystem beneath an overlay's immutable layers.
 type Bottom interface {
 	Lstat(p string) (os.FileInfo, error)
-	// ReadDir rejects missing paths and non-directories, including final symlinks.
+	// ReadDir returns a caller-owned slice sorted by name. It rejects missing
+	// paths and non-directories, including final symlinks.
 	ReadDir(p string) ([]os.FileInfo, error)
 	Open(p string) (Content, error)
 	Readlink(p string) (string, error)

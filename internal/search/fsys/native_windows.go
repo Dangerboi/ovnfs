@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"slices"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -487,6 +488,15 @@ func (s *session) list(h handle, detail Detail, _ uint32) error {
 		if n > len(buf) {
 			return windows.ERROR_INVALID_DATA
 		}
+		var names string
+		var slab []winInfo
+		if detail == metadataDetail {
+			var err error
+			names, slab, err = s.metadataBatch(buf[:n])
+			if err != nil {
+				return err
+			}
+		}
 		for off := 0; ; {
 			if off+fdiFileName > n {
 				return windows.ERROR_INVALID_DATA
@@ -501,7 +511,9 @@ func (s *session) list(h handle, detail Detail, _ uint32) error {
 			if !isDotOrDotDotUTF16(wname) && nameLen > 0 {
 				attrs := binary.LittleEndian.Uint32(rec[fdiFileAttributes:])
 				if detail == metadataDetail {
-					s.addMetadata(rec, wname, attrs)
+					var name string
+					name, names, _ = strings.Cut(names, "\x00")
+					s.addMetadata(rec, name, attrs, &slab)
 				} else {
 					typ, size := File, int64(binary.LittleEndian.Uint64(rec[fdiEndOfFile:]))
 					switch {
@@ -527,6 +539,44 @@ func (s *session) list(h handle, detail Detail, _ uint32) error {
 			off += next
 		}
 	}
+}
+
+// metadataBatch converts names once into reusable scratch, then freezes only
+// those bytes, not the native records. NUL separators locate each WTF-8 name
+// without an offset allocation or a second UTF-16 conversion.
+func (s *session) metadataBatch(buf []byte) (string, []winInfo, error) {
+	scratch := s.ls.names[:0]
+	entries, ordinary := 0, 0
+	for off := 0; ; {
+		if off+fdiFileName > len(buf) {
+			return "", nil, windows.ERROR_INVALID_DATA
+		}
+		rec := buf[off:]
+		next := int(binary.LittleEndian.Uint32(rec[fdiNextEntryOffset:]))
+		nameLen := int(binary.LittleEndian.Uint32(rec[fdiFileNameLength:]))
+		if nameLen%2 != 0 || fdiFileName+nameLen > len(rec) {
+			return "", nil, windows.ERROR_INVALID_DATA
+		}
+		wname := unsafe.Slice((*uint16)(unsafe.Pointer(&rec[fdiFileName])), nameLen/2)
+		if nameLen > 0 && !isDotOrDotDotUTF16(wname) {
+			scratch = appendWTF8(scratch, wname)
+			scratch = append(scratch, 0)
+			entries++
+			if binary.LittleEndian.Uint32(rec[fdiFileAttributes:])&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+				ordinary++
+			}
+		}
+		if next == 0 {
+			break
+		}
+		if next < fdiFileName || off+next > len(buf) {
+			return "", nil, windows.ERROR_INVALID_DATA
+		}
+		off += next
+	}
+	s.ls.names = scratch
+	s.entries = slices.Grow(s.entries, entries)
+	return string(scratch), make([]winInfo, 0, ordinary), nil
 }
 
 func isDotOrDotDotUTF16(name []uint16) bool {

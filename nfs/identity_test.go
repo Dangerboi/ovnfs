@@ -3,6 +3,7 @@ package nfs
 import (
 	"github.com/go-git/go-billy/v5"
 	"os"
+	"path"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -20,6 +21,10 @@ func (f *failingIdentityFS) FileID(p string) uint64 {
 		return 0
 	}
 	return f.testFS.FileID(p)
+}
+
+func (f *failingIdentityFS) ChildID(dir, name string) uint64 {
+	return f.FileID(path.Join(dir, name))
 }
 
 func (f *failingIdentityFS) IdentityError() error {
@@ -101,6 +106,10 @@ func (f allocationFS) FileID(p string) uint64 {
 	}
 	return f.testFS.FileID(p)
 }
+func (f allocationFS) ChildID(dir, name string) uint64 {
+	return f.FileID(path.Join(dir, name))
+}
+
 func TestRefusedAllocationIsIO(t *testing.T) {
 	fs := allocationFS{newTestFS(t)}
 	fs.write(t, "f", "content")
@@ -187,6 +196,10 @@ func (f *refusedCreateFS) FileID(p string) uint64 {
 	}
 	return f.testFS.FileID(p)
 }
+func (f *refusedCreateFS) ChildID(dir, name string) uint64 {
+	return f.FileID(path.Join(dir, name))
+}
+
 func (f *refusedCreateFS) OpenFile(p string, flag int, perm os.FileMode) (billy.File, error) {
 	file, err := f.testFS.OpenFile(p, flag, perm)
 	if err != nil {

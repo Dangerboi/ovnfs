@@ -16,6 +16,11 @@ type nfsFS struct{ protocolFS }
 // races with the reply that granted it.
 func (e *Export) NFS() nfs.Backend { return &nfsFS{e.protocolFS()} }
 
+// ChildID identifies a listed child without constructing its full path.
+func (n *nfsFS) ChildID(dir, name string) uint64 {
+	return n.nodes.childID(dir, name)
+}
+
 // Path resolves a live node id, which NFS file handles carry, to its path.
 func (n *nfsFS) Path(id uint64) (string, bool) {
 	return n.nodes.path(id)

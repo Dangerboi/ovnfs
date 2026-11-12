@@ -32,6 +32,12 @@ func (f pressuredFS) FileID(p string) uint64 {
 	return id
 }
 
+func (f pressuredFS) ChildID(dir, name string) uint64 {
+	id := f.Backend.ChildID(dir, name)
+	f.Backend.FileID("co/pressure/file")
+	return id
+}
+
 // TestEvictedHandlesAndReaddir uses a real overlay and wire NFSv3 requests.
 func TestEvictedHandlesAndReaddir(t *testing.T) {
 	root := t.TempDir()

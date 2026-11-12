@@ -282,6 +282,16 @@ func TestUnpairedSurrogateName(t *testing.T) {
 	}
 	windows.CloseHandle(h)
 	name := string(appendWTF8(nil, name16))
+	entries, err := ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != name {
+		t.Fatalf("metadata listing = %v, want one entry named %q", entries, name)
+	}
+	if info, err := entries[0].Info(); err != nil || info.Name() != name {
+		t.Fatalf("metadata info = %v, %v; want name %q", info, err, name)
+	}
 
 	s := Native.NewSession()
 	dir, err := s.OpenDir(root)

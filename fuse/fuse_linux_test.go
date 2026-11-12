@@ -646,8 +646,8 @@ func TestIndexFaultBlocksTruncate(t *testing.T) {
 		t.Fatal("missing cold index did not latch a fault")
 	}
 	wantErrno(t, "ftruncate after index fault", held.Truncate(1), syscall.EIO)
-	session, err := f.reg.Enter("alpha")
-	if err != nil {
+	var session checkout.Session
+	if err := f.reg.Enter("alpha", &session); err != nil {
 		t.Fatal(err)
 	}
 	info, err := session.FS.Lstat("d/file")

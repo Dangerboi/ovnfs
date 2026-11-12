@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stencil-hq/ovnfs/api"
+	"github.com/stencil-hq/ovnfs/checkout"
 	"github.com/stencil-hq/ovnfs/internal/nfstest"
 )
 
@@ -95,8 +96,8 @@ func TestRecallsChangesBehindNFSClients(t *testing.T) {
 		t.Fatal("a write through another protocol did not recall the NFS handle")
 	}
 
-	s, err := f.reg.Enter("app")
-	if err != nil {
+	var s checkout.Session
+	if err := f.reg.Enter("app", &s); err != nil {
 		t.Fatal(err)
 	}
 	err = s.FS.Remove("gone")
@@ -129,11 +130,11 @@ func TestInvalidationRetiresColdHashes(t *testing.T) {
 			old := nodes.ID("app/f998")
 			f.export.SetNodeCache(0)
 			nodes.ID("app/pressure/file")
-			session, err := f.reg.Enter("app")
-			if err != nil {
+			var session checkout.Session
+			if err := f.reg.Enter("app", &session); err != nil {
 				t.Fatal(err)
 			}
-			err = session.FS.Remove("f998")
+			err := session.FS.Remove("f998")
 			session.Done()
 			if err != nil {
 				t.Fatal(err)

@@ -437,8 +437,8 @@ func TestIncrementalHashScenarios(t *testing.T) {
 func TestSnapshotKeepsNestedEmptyDirectories(t *testing.T) {
 	f := newFixture(t)
 	f.newCheckout(folder(t, map[string]string{"x": "1"}), "c")
-	s, err := f.reg.Enter("c")
-	if err != nil {
+	var s Session
+	if err := f.reg.Enter("c", &s); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.FS.MkdirAll("a/b/c", 0o755); err != nil {
@@ -488,8 +488,8 @@ func TestSnapshotStoresEditAsDelta(t *testing.T) {
 			before := storeBytes(t, f.state)
 			rename := func(from, to string) {
 				t.Helper()
-				s, err := f.reg.Enter("c")
-				if err != nil {
+				var s Session
+				if err := f.reg.Enter("c", &s); err != nil {
 					t.Fatal(err)
 				}
 				defer s.Done()
@@ -603,8 +603,8 @@ func TestStoredLayerKeepsOnlyRawLeftovers(t *testing.T) {
 	f.put("c", "debug.log", "local only")
 	f.remove("c", "gone")
 	f.remove("c", "dir/old")
-	s, err := f.reg.Enter("c")
-	if err != nil {
+	var s Session
+	if err := f.reg.Enter("c", &s); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.FS.Symlink("src/new.txt", "link"); err != nil {
@@ -622,8 +622,8 @@ func TestStoredLayerKeepsOnlyRawLeftovers(t *testing.T) {
 				t.Fatalf("%s reads %q, want %q", p, got, want)
 			}
 		}
-		s, err := f.reg.Enter("c")
-		if err != nil {
+		var s Session
+		if err := f.reg.Enter("c", &s); err != nil {
 			t.Fatal(err)
 		}
 		defer s.Done()
@@ -693,8 +693,8 @@ func TestRestartStoresHashedRawLayers(t *testing.T) {
 func TestRestartIndexesRenamedDirectoryWithDeletion(t *testing.T) {
 	f := newFixture(t)
 	f.newCheckout(folder(t, map[string]string{"d/x": "x", "d/y": "y"}), "c")
-	s, err := f.reg.Enter("c")
-	if err != nil {
+	var s Session
+	if err := f.reg.Enter("c", &s); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.FS.Remove("d/x"); err != nil {
@@ -757,8 +757,8 @@ func TestStoredLayerCopyUpAndDiff(t *testing.T) {
 	f.newCheckout(folder(t, map[string]string{"a": "base"}), "c")
 	f.put("c", "a", "layer")
 	f.put("c", "run.sh", "#!/bin/sh")
-	s, err := f.reg.Enter("c")
-	if err != nil {
+	var s Session
+	if err := f.reg.Enter("c", &s); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.FS.Chmod("run.sh", 0o750); err != nil {
@@ -777,8 +777,7 @@ func TestStoredLayerCopyUpAndDiff(t *testing.T) {
 	if !strings.Contains(diff.Patch, "+layer") || !strings.Contains(diff.Patch, "+#!/bin/sh") {
 		t.Fatalf("patch over stored layer:\n%s", diff.Patch)
 	}
-	s, err = f.reg.Enter("c")
-	if err != nil {
+	if err := f.reg.Enter("c", &s); err != nil {
 		t.Fatal(err)
 	}
 	defer s.Done()

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -278,12 +279,17 @@ func (s *session) listBulk(h handle, detail Detail, count uint32) error {
 		if n > len(buf)/bulkMinLen {
 			return unix.EIO
 		}
+		var names strings.Builder
 		if detail == metadataDetail {
-			// The kernel has already counted this batch. Allocate only that
-			// many records instead of rounding every small directory up to
-			// infoSlabSize; returned entries keep the slab alive.
-			slab = make([]nativeInfo, 0, n)
-			s.entries = slices.Grow(s.entries, n)
+			nameBytes, entries, err := metadataBatchSize(buf, n)
+			if err != nil {
+				return err
+			}
+			// Own only the names, not the much larger stat records in buf.
+			// Exact growth keeps even the last short batch compact.
+			names.Grow(nameBytes)
+			slab = make([]nativeInfo, 0, entries)
+			s.entries = slices.Grow(s.entries, entries)
 		}
 		off := 0
 		for range n {
@@ -298,7 +304,7 @@ func (s *session) listBulk(h handle, detail Detail, count uint32) error {
 			rec = rec[:reclen]
 			off += reclen
 			if detail == metadataDetail {
-				entry, err := s.metadataEntry(h, rec, &slab)
+				entry, err := s.metadataEntry(h, rec, &slab, &names)
 				if err != nil {
 					return err
 				}
@@ -417,11 +423,40 @@ func recordName(rec []byte, minOff int) (name []byte, nameOff int, ok bool) {
 	return name, nameOff, true
 }
 
+// metadataBatchSize validates the names before sizing their immutable arena.
+// Only real entries contribute storage; "." and ".." are never returned.
+func metadataBatchSize(buf []byte, n int) (nameBytes, entries int, err error) {
+	for off := 0; n > 0; n-- {
+		if off+bulkMinLen > len(buf) {
+			return 0, 0, unix.EIO
+		}
+		rec := buf[off:]
+		reclen := int(binary.LittleEndian.Uint32(rec))
+		if reclen < bulkMinLen || reclen > len(rec) {
+			return 0, 0, unix.EIO
+		}
+		rec = rec[:reclen]
+		off += reclen
+		if binary.LittleEndian.Uint32(rec[bulkReturnedCommon:])&attrCmnName == 0 {
+			return 0, 0, unix.EIO
+		}
+		name, _, ok := recordName(rec, bulkNameRef+8)
+		if !ok {
+			return 0, 0, unix.EIO
+		}
+		if len(name) != 0 && !isDotOrDotDot(name) {
+			nameBytes += len(name)
+			entries++
+		}
+	}
+	return nameBytes, entries, nil
+}
+
 // metadataEntry describes the entry of bulk record rec in directory dir. A
 // regular file whose record holds a complete stat record is described by it;
 // anything else is lstat'ed relative to dir, and one that fails is a
 // failedEntry. A nil entry is "." or "..".
-func (s *session) metadataEntry(dir handle, rec []byte, slab *[]nativeInfo) (os.DirEntry, error) {
+func (s *session) metadataEntry(dir handle, rec []byte, slab *[]nativeInfo, names *strings.Builder) (os.DirEntry, error) {
 	if binary.LittleEndian.Uint32(rec[bulkReturnedCommon:])&attrCmnName == 0 {
 		return nil, unix.EIO
 	}
@@ -434,7 +469,9 @@ func (s *session) metadataEntry(dir handle, rec []byte, slab *[]nativeInfo) (os.
 	}
 	info := newInfo(slab)
 	vtype, complete := bulkStat(rec, nameOff, &info.st)
-	name := string(raw)
+	start := names.Len()
+	names.Write(raw)
+	name := names.String()[start:]
 	if !complete {
 		cname := append(append(s.cname[:0], raw...), 0)
 		s.cname = cname

@@ -68,8 +68,8 @@ func TestReattachKeepsCacheAndHandles(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			s, err := dst.reg.Enter(first.Name)
-			if err != nil {
+			var s Session
+			if err := dst.reg.Enter(first.Name, &s); err != nil {
 				t.Fatal(err)
 			}
 			fs, gen := s.FS, s.Gen
@@ -91,8 +91,7 @@ func TestReattachKeepsCacheAndHandles(t *testing.T) {
 			if !slices.ContainsFunc(dst.invalidations(), func(i invalidation) bool { return i.checkout == second.Name && i.whole() }) {
 				t.Fatal("reattach swapped the base without invalidating the checkout")
 			}
-			s, err = dst.reg.Enter(second.Name)
-			if err != nil {
+			if err := dst.reg.Enter(second.Name, &s); err != nil {
 				t.Fatal(err)
 			}
 			if s.FS != fs || s.Gen != gen {
@@ -288,8 +287,8 @@ func TestPullRejectsCorruptAndRedirectedPaths(t *testing.T) {
 	if _, err := src.reg.MergePull(context.Background(), api.PullArgs{Checkout: "app"}, offer.Tree, pulled); err == nil {
 		t.Fatal("accepted a traversal path")
 	}
-	s, err := src.reg.Enter("app")
-	if err != nil {
+	var s Session
+	if err := src.reg.Enter("app", &s); err != nil {
 		t.Fatal(err)
 	}
 	outside := t.TempDir()
@@ -419,8 +418,8 @@ func TestAttachFetchesLazily(t *testing.T) {
 	dst := &fixture{t: t, reg: reg}
 	h := api.Checkout{Name: l.name}
 
-	view, err := reg.Enter(h.Name)
-	if err != nil {
+	var view Session
+	if err := reg.Enter(h.Name, &view); err != nil {
 		t.Fatal(err)
 	}
 	info, err := view.FS.Lstat("b/big.bin")
@@ -503,8 +502,8 @@ func TestMissingIsAllTheLinkServes(t *testing.T) {
 			t.Errorf("%s with the link down = %q, want %q", p, got, want)
 		}
 	}
-	view, err := l.reg.Enter(l.name)
-	if err != nil {
+	var view Session
+	if err := l.reg.Enter(l.name, &view); err != nil {
 		t.Fatal(err)
 	}
 	defer view.Done()

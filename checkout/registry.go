@@ -423,20 +423,26 @@ func (r *Registry) Close() error {
 }
 
 // Enter pins a checkout generation under the shared freeze lock for one file call.
-func (r *Registry) Enter(name string) (*Session, error) {
+// The caller supplies a non-nil, zero or completed session and must call Done
+// after using its FS and Gen. Enter leaves the session unchanged on failure.
+func (r *Registry) Enter(name string, s *Session) error {
 	r.mu.RLock()
 	h := r.checkouts[name]
 	closed := r.closed
 	r.mu.RUnlock()
 	if h == nil || closed {
-		return nil, failure("not_found", "no checkout %s", name)
+		return failure("not_found", "no checkout %s", name)
 	}
 	h.freeze.RLock()
 	if h.retired.Load() {
 		h.freeze.RUnlock()
-		return nil, failure("not_found", "no checkout %s", name)
+		return failure("not_found", "no checkout %s", name)
 	}
-	return &Session{FS: h.fs, Gen: h.generation.Load(), record: h}, nil
+	s.FS = h.fs
+	s.Gen = h.generation.Load()
+	s.record = h
+	s.done.Store(false)
+	return nil
 }
 
 // Gen returns a checkout generation without waiting for its freeze lock.
