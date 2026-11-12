@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -237,10 +240,20 @@ func TestStatCacheConcurrentSave(t *testing.T) {
 	}
 	wg.Wait()
 	close(errc)
+	saved := 0
 	for err := range errc {
-		if err != nil {
+		switch {
+		case err == nil:
+			saved++
+		// Windows refuses to replace a file that another rename is replacing
+		// at that instant (ERROR_ACCESS_DENIED): that save is lost, not torn.
+		case runtime.GOOS == "windows" && errors.Is(err, fs.ErrPermission):
+		default:
 			t.Fatal(err)
 		}
+	}
+	if saved == 0 {
+		t.Fatal("no save was published")
 	}
 	raw, err := os.ReadFile(name)
 	if err != nil {
