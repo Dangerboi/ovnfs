@@ -20,12 +20,16 @@ jobs:
       # the build service authenticates this repository's tag runs with.
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7
+          persist-credentials: false
+      # No Go cache: the published binaries build from nothing another run
+      # could have saved.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
       # goreleaser is built from the Go module proxy rather than downloaded from
       # GitHub releases, whose 504s once held a release back; keep the version
       # in step with ci.yml (dependabot does not see it).
