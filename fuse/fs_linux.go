@@ -57,12 +57,11 @@ type dirHandle struct {
 	entries []dirEntry
 }
 
-// dirEntry is one listed name with the attributes READDIRPLUS returns.
+// dirEntry is one listed name; READDIRPLUS stats it again when answering.
 type dirEntry struct {
 	name string
 	ino  uint64
 	mode uint32
-	info os.FileInfo
 }
 
 // newExportFS serves nodes with the daemon's credentials; a root daemon gives
@@ -786,7 +785,7 @@ func (x *exportFS) list(d *dirHandle) error {
 		if ino == 0 || x.nodes.IdentityError() != nil {
 			return syscall.EIO
 		}
-		entries = append(entries, dirEntry{name: info.Name(), ino: ino, mode: unixMode(info.Mode()), info: info})
+		entries = append(entries, dirEntry{name: info.Name(), ino: ino, mode: unixMode(info.Mode())})
 	}
 	d.entries = entries
 	return nil
@@ -805,7 +804,7 @@ func (x *exportFS) ReadDir(_ <-chan struct{}, in *gofuse.ReadIn, out *gofuse.Dir
 	return x.readDir(in, out, false)
 }
 
-// ReadDirPlus lists names with attributes from the snapshot.
+// ReadDirPlus lists names from the snapshot with their current attributes.
 func (x *exportFS) ReadDirPlus(_ <-chan struct{}, in *gofuse.ReadIn, out *gofuse.DirEntryList) gofuse.Status {
 	return x.readDir(in, out, true)
 }
@@ -837,14 +836,28 @@ func (x *exportFS) readDir(in *gofuse.ReadIn, out *gofuse.DirEntryList, plus boo
 		if eo == nil {
 			break
 		}
-		if e.info != nil {
-			eo.NodeId = e.ino
-			x.fill(&eo.Attr, e.ino, e.info)
-			eo.SetEntryTimeout(TTL)
-			eo.SetAttrTimeout(attrTTL(&eo.Attr))
+		if i >= 2 { // "." and ".." carry no attributes
+			x.lookupEntry(d.path, e, eo)
 		}
 	}
 	return gofuse.OK
+}
+
+// lookupEntry fills eo with the current attributes of e in directory dir. The
+// kernel applies READDIRPLUS attributes over every write it saw before sending
+// the request, so they come from a fresh stat, never the OPENDIR snapshot. A
+// name that is gone or now names another node is listed without attributes;
+// the kernel then looks it up on use.
+func (x *exportFS) lookupEntry(dir string, e dirEntry, eo *gofuse.EntryOut) {
+	p := path.Join(dir, e.name)
+	info, err := x.nodes.Lstat(p)
+	if err != nil || x.nodes.ID(p) != e.ino {
+		return
+	}
+	eo.NodeId = e.ino
+	x.fill(&eo.Attr, e.ino, info)
+	eo.SetEntryTimeout(TTL)
+	eo.SetAttrTimeout(attrTTL(&eo.Attr))
 }
 
 // ReleaseDir drops a directory snapshot.

@@ -540,6 +540,41 @@ func TestOpenFileOutlivesItsName(t *testing.T) {
 	}
 }
 
+// TestListingReportsCurrentSizes checks that READDIRPLUS answers with the sizes
+// entries have when it runs, not when their directory was opened: the kernel
+// would keep a stale size for the attribute TTL and clamp reads to it.
+func TestListingReportsCurrentSizes(t *testing.T) {
+	f := newFixture(t, nil)
+	if err := os.Mkdir(f.path("alpha/out"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w, err := os.Create(f.path("alpha/out/obj.o"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.Open(f.path("alpha/out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	data := bytes.Repeat([]byte("x"), 100000)
+	if _, err := w.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dir.ReadDir(-1); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(f.path("alpha/out/obj.o")); err != nil || info.Size() != int64(len(data)) {
+		t.Fatalf("stat after listing: %v, %v; want size %d", info, err, len(data))
+	}
+	if got, err := os.ReadFile(f.path("alpha/out/obj.o")); err != nil || len(got) != len(data) {
+		t.Fatalf("read after listing: %d bytes, %v; want %d", len(got), err, len(data))
+	}
+}
+
 // TestErrnoMapping checks the export error to errno table.
 func TestErrnoMapping(t *testing.T) {
 	for _, c := range []struct {
