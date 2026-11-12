@@ -84,8 +84,20 @@ func saveStatCache(name string, tree store.OID, files map[string]store.File, ent
 	if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
 		return err
 	}
-	tmp := name + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	// A unique temp so two concurrent saves cannot share name+".tmp": the
+	// first rename would then leave the second with ENOENT, or the second
+	// could write into the inode after it was published.
+	f, err := os.CreateTemp(filepath.Dir(name), filepath.Base(name)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, name); err != nil {

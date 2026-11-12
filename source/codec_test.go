@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -203,6 +204,68 @@ func TestStatCacheRoundTrip(t *testing.T) {
 	stray := map[string]statEntry{"not-captured": {Mode: store.ModeFile, OID: files["a.txt"].ID}}
 	if err := saveStatCache(filepath.Join(t.TempDir(), "stray.stat"), tree, files, stray, now, "e"); err == nil {
 		t.Fatal("saved an entry that is not a leaf of the capture")
+	}
+}
+
+// TestStatCacheConcurrentSave keeps the published cache decodable when many
+// writers save at once. A shared name+".tmp" could drop the first writer's
+// file with ENOENT or let the second write into the inode after it was
+// published; each writer now uses its own temp file.
+func TestStatCacheConcurrentSave(t *testing.T) {
+	st, err := store.Open(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, files := storedTree(t, st, "a.txt")
+	now := time.Now()
+	old := now.Add(-time.Hour).UnixNano()
+	name := filepath.Join(t.TempDir(), "x.stat")
+	const writers = 32
+	want := make([]statCache, writers)
+	errc := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		entries := map[string]statEntry{
+			"a.txt": {Size: int64(i + 1), Mtime: old, Ctime: old, Ino: uint64(i + 1), Mode: store.ModeFile, OID: files["a.txt"].ID},
+		}
+		want[i] = statCache{Epoch: fmt.Sprintf("w-%d", i), Entries: entries}
+		wg.Add(1)
+		go func(entries map[string]statEntry, epoch string) {
+			defer wg.Done()
+			errc <- saveStatCache(name, tree, files, entries, now, epoch)
+		}(entries, want[i].Epoch)
+	}
+	wg.Wait()
+	close(errc)
+	for err := range errc {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeStatCache(raw, st)
+	if err != nil {
+		t.Fatalf("published cache does not decode: %v", err)
+	}
+	matched := false
+	for _, w := range want {
+		if got.Epoch == w.Epoch && reflect.DeepEqual(got.Entries, w.Entries) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		t.Fatalf("loaded %+v, which is not any writer's cache", got)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(name), filepath.Base(name)+".*.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("leftover temp files %v", leftovers)
 	}
 }
 
