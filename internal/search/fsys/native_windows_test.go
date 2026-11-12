@@ -328,7 +328,9 @@ func TestUnpairedSurrogateName(t *testing.T) {
 
 // TestIdentifyDirSurvivesRename requires a directory handle to keep its
 // identity while the directory is renamed, which the delete-sharing open
-// allows, and to match what a path to the directory identifies as.
+// allows, and to match what a path to the directory identifies as. NTFS
+// refuses to rename a directory while anything beneath it is open, whatever
+// that handle shares, so the child is closed first and reopened after.
 func TestIdentifyDirSurvivesRename(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -354,8 +356,8 @@ func TestIdentifyDirSurvivesRename(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close(child)
 	childID, err := s.IdentifyDir(child)
+	s.Close(child)
 	if err != nil || childID == id || childID.Dev != id.Dev {
 		t.Fatalf("child identity = %v, %v; parent %v", childID, err, id)
 	}
@@ -375,6 +377,10 @@ func TestIdentifyDirSurvivesRename(t *testing.T) {
 	if _, err := s.Identify(filepath.Join(root, "before")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Identify(old path) = %v, want not-exist", err)
 	}
+	if child, err = s.OpenChild(h, "child"); err != nil {
+		t.Fatalf("OpenChild after rename: %v", err)
+	}
+	defer s.Close(child)
 	if got, err := s.IdentifyDir(child); err != nil || got != childID {
 		t.Errorf("child IdentifyDir after rename = %v, %v; want %v", got, err, childID)
 	}
