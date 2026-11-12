@@ -305,7 +305,11 @@ func TestReadDirPreservesCapturedMetadata(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if entry.Mode() != info.Mode() || entry.Size() != info.Size() || !entry.ModTime().Equal(info.ModTime()) {
+			// NTFS refreshes the copy of a directory's timestamps kept in its
+			// parent's index lazily, so a native listing (os.ReadDir too) may
+			// report an older directory mtime than a stat of the directory.
+			staleDirTime := runtime.GOOS == "windows" && entry.IsDir()
+			if entry.Mode() != info.Mode() || entry.Size() != info.Size() || !staleDirTime && !entry.ModTime().Equal(info.ModTime()) {
 				t.Errorf("%s/%s: listing metadata differs from stat: %v, %v", p, entry.Name(), entry, info)
 			}
 		}
