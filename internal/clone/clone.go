@@ -57,9 +57,10 @@ func FD(in *os.File, dst string, mode os.FileMode) error {
 // keeps extended attributes and any sockets, fifos and devices inside it.
 // Elsewhere, or when that call is unsupported, Tree walks the hierarchy,
 // cloning each regular file as [FD] does and skipping special files. A special
-// file at src copies nothing.
+// file at src copies nothing. A Windows junction is a symlink here
+// ([hostfile.Linked]) and copies as one ([hostfile.Symlink]).
 func Tree(src, dst string) error {
-	info, err := os.Lstat(src)
+	info, err := hostfile.Lstat(src)
 	if err != nil {
 		return err
 	}
@@ -88,7 +89,7 @@ func (w *walk) tree(src, dst string, info fs.FileInfo) error {
 		if err != nil {
 			return err
 		}
-		if err := os.Symlink(target, dst); err != nil {
+		if err := hostfile.Symlink(target, dst); err != nil {
 			return err
 		}
 		return hostfile.Lchtimes(dst, info.ModTime(), info.ModTime())
@@ -106,7 +107,8 @@ func (w *walk) tree(src, dst string, info fs.FileInfo) error {
 			if err != nil {
 				return err
 			}
-			if err := w.tree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), child); err != nil {
+			from := filepath.Join(src, e.Name())
+			if err := w.tree(from, filepath.Join(dst, e.Name()), hostfile.Linked(from, child)); err != nil {
 				return err
 			}
 		}

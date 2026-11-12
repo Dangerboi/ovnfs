@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stencil-hq/ovnfs/git"
+	"github.com/stencil-hq/ovnfs/internal/hostfile"
 	"github.com/stencil-hq/ovnfs/source"
 	"github.com/stencil-hq/ovnfs/store"
 )
@@ -201,11 +202,11 @@ func materializeGitdir(st *store.Store, tree store.OID, dst string, objects func
 		if _, err := os.Lstat(filepath.Join(dir, "objects")); err == nil {
 			continue // a real object directory, of a submodule cloned again in the checkout
 		}
-		if err := os.Symlink(objects(sub.Module), filepath.Join(dir, "objects")); err != nil {
+		if err := hostfile.Symlink(objects(sub.Module), filepath.Join(dir, "objects")); err != nil {
 			return err
 		}
 	}
-	return os.Symlink(objects(""), filepath.Join(dst, "objects"))
+	return hostfile.Symlink(objects(""), filepath.Join(dst, "objects"))
 }
 
 // saveGit stores a git checkout's private git directory for its next snapshot,

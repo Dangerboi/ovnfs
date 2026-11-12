@@ -112,7 +112,7 @@ func (r *Repo) MakeGitdir(gitdir, objects, index string) error {
 			return err
 		}
 	}
-	return os.Symlink(objects, filepath.Join(gitdir, "objects"))
+	return hostfile.Symlink(objects, filepath.Join(gitdir, "objects"))
 }
 
 // UnsetModuleWorktrees removes core.worktree from every submodule git directory
@@ -192,7 +192,7 @@ func CopyGitdir(src, dst, objects string) error {
 			return err
 		}
 	}
-	return os.Symlink(objects, filepath.Join(dst, "objects"))
+	return hostfile.Symlink(objects, filepath.Join(dst, "objects"))
 }
 
 // MarkCheckout sets ovnfs.checkout to name in a private git directory's own config, so

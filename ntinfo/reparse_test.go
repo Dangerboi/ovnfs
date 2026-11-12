@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io/fs"
+	"slices"
 	"testing"
 	"unicode/utf16"
 )
@@ -142,6 +143,29 @@ func TestParseJunction(t *testing.T) {
 	}
 	if _, err := ParseSymlinkReparse(mountPointReparse(`packages\utils`, `packages\utils`)); !errors.Is(err, fs.ErrInvalid) {
 		t.Errorf("relative junction: %v", err)
+	}
+}
+
+// TestJunctionReparse encodes junctions as mklink /J does, so the daemon can
+// link directories without the symlink privilege, and refuses targets a
+// junction cannot hold.
+func TestJunctionReparse(t *testing.T) {
+	for target, print := range map[string]string{
+		"C:/Users/me/ovnfs/bases/b_1/objects": `C:\Users\me\ovnfs\bases\b_1\objects`,
+		"//?/C:/x":                            `C:\x`,
+	} {
+		b, err := JunctionReparse(target)
+		if err != nil {
+			t.Fatalf("%q: %v", target, err)
+		}
+		if want := mountPointReparse(`\??\`+print, print); !slices.Equal(b, want) {
+			t.Errorf("%q: buffer %x, want %x", target, b, want)
+		}
+	}
+	for _, target := range []string{"objects", "../objects", "/objects", "//srv/share/objects"} {
+		if _, err := JunctionReparse(target); !errors.Is(err, fs.ErrInvalid) {
+			t.Errorf("%q: %v, want fs.ErrInvalid", target, err)
+		}
 	}
 }
 

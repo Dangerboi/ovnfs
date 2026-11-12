@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/stencil-hq/ovnfs/ntinfo"
 	"golang.org/x/sys/windows"
 )
 
@@ -186,6 +187,48 @@ func CreateTemp(dir, pattern string) (*os.File, error) {
 		}
 	}
 	return nil, &os.PathError{Op: "createtemp", Path: filepath.Join(dir, pattern), Err: os.ErrExist}
+}
+
+// Symlink is [os.Symlink], except that an account that may not create symbolic
+// links (no SeCreateSymbolicLinkPrivilege and no Developer Mode, as for most
+// standard users) gets a junction when target is an absolute path to a
+// directory. Junctions need no privilege, and [Linked] and [os.Readlink] read
+// one as the symlink it stands for. Every other failure is os.Symlink's.
+func Symlink(target, link string) error {
+	err := os.Symlink(target, link)
+	if !errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD) || !filepath.IsAbs(target) {
+		return err
+	}
+	if info, statErr := os.Stat(target); statErr != nil || !info.IsDir() {
+		return err
+	}
+	if err := os.Mkdir(link, 0o755); err != nil {
+		return err
+	}
+	if err := setJunction(link, target); err != nil {
+		os.Remove(link)
+		return &os.LinkError{Op: "junction", Old: target, New: link, Err: err}
+	}
+	return nil
+}
+
+// setJunction turns the empty directory dir into a junction to target.
+func setJunction(dir, target string) error {
+	buf, err := ntinfo.JunctionReparse(filepath.ToSlash(target))
+	if err != nil {
+		return err
+	}
+	p, err := windows.UTF16PtrFromString(longPath(dir))
+	if err != nil {
+		return err
+	}
+	h, err := windows.CreateFile(p, windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(h)
+	var n uint32
+	return windows.DeviceIoControl(h, windows.FSCTL_SET_REPARSE_POINT, &buf[0], uint32(len(buf)), nil, 0, &n, nil)
 }
 
 // Linked describes a junction, which Go reports as an irregular file since Go

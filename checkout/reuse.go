@@ -14,6 +14,7 @@ import (
 	"github.com/stencil-hq/ovnfs/api"
 	"github.com/stencil-hq/ovnfs/base"
 	"github.com/stencil-hq/ovnfs/git"
+	"github.com/stencil-hq/ovnfs/internal/hostfile"
 	"github.com/stencil-hq/ovnfs/manifest"
 	"github.com/stencil-hq/ovnfs/source"
 )
@@ -477,7 +478,7 @@ func (r *Registry) namePrepared(h *checkoutRecord, name, config string) error {
 	gitdir := r.gitdirPath(h.meta.dir())
 	link, objects := filepath.Join(gitdir, "objects"), r.objectsPath(h.meta.Base, "")
 	if target, err := os.Readlink(link); err != nil || target != objects {
-		if err := errors.Join(os.Remove(link), os.Symlink(objects, link)); err != nil {
+		if err := errors.Join(os.Remove(link), hostfile.Symlink(objects, link)); err != nil {
 			return err
 		}
 	}

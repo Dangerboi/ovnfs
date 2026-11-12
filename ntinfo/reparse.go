@@ -101,6 +101,40 @@ func SymlinkReparse(target string) ([]byte, error) {
 	return b, nil
 }
 
+// JunctionReparse encodes target, an absolute slash-separated drive path such
+// as C:/x (or //?/C:/x), as an IO_REPARSE_TAG_MOUNT_POINT REPARSE_DATA_BUFFER
+// (header included), for FSCTL_SET_REPARSE_POINT on an empty directory. The
+// layout is mklink /J's: substitute name \??\C:\x, then print name C:\x, each
+// NUL-terminated. Junctions cannot name relative or network targets; those
+// fail with [fs.ErrInvalid].
+func JunctionReparse(target string) ([]byte, error) {
+	if strings.HasPrefix(target, "//?/") {
+		target = target[4:]
+	}
+	if !isDrivePath(target) {
+		return nil, fmt.Errorf("ntinfo: junction target %q is not a drive path: %w", target, fs.ErrInvalid)
+	}
+	print := strings.ReplaceAll(target, "/", "\\")
+	sub, prn := utf16.Encode([]rune(`\??\`+print)), utf16.Encode([]rune(print))
+	n := 2 * (len(sub) + 1 + len(prn) + 1)
+	if 8+n > 65535 {
+		return nil, fmt.Errorf("ntinfo: junction target too long: %w", fs.ErrInvalid)
+	}
+	b := make([]byte, 16, 16+n)
+	binary.LittleEndian.PutUint32(b, ReparseTagMountPoint)
+	binary.LittleEndian.PutUint16(b[4:], uint16(8+n))
+	binary.LittleEndian.PutUint16(b[10:], uint16(2*len(sub)))
+	binary.LittleEndian.PutUint16(b[12:], uint16(2*len(sub)+2))
+	binary.LittleEndian.PutUint16(b[14:], uint16(2*len(prn)))
+	for _, name := range [2][]uint16{sub, prn} {
+		for _, u := range name {
+			b = binary.LittleEndian.AppendUint16(b, u)
+		}
+		b = binary.LittleEndian.AppendUint16(b, 0)
+	}
+	return b, nil
+}
+
 // ParseSymlinkReparse decodes an IO_REPARSE_TAG_SYMLINK buffer (header included)
 // into a POSIX-style link target, for FSCTL_SET_REPARSE_POINT. A junction's
 // IO_REPARSE_TAG_MOUNT_POINT buffer decodes to its absolute target, so the

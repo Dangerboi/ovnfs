@@ -145,6 +145,12 @@ without the flag, Windows would describe the link by its target for its
 metadata cache lifetime, and realpath in tools such as tsc and Bun would
 stop seeing it.
 
+A git checkout's private git directory on the host links `objects` to its
+base's shared object directory. An account that may not create symlinks
+(no `SeCreateSymbolicLinkPrivilege` and Developer Mode off, as for most
+standard users) gets a junction there instead; git and the daemon read it as
+the same link.
+
 ### Unix modes and Defender
 
 Unix mode bits that NTFS cannot hold (execute, setuid, setgid, sticky, and any

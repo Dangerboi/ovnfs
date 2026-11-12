@@ -6,7 +6,9 @@
 // read-only files are replaced or deleted without touching their attribute, as
 // on Unix.
 // Windows still refuses to rename a directory while any file below it is open;
-// see [overlay.FS.CloseFiles]. [Lstat] describes Windows junctions as symlinks.
+// see [overlay.FS.CloseFiles]. [Lstat] describes Windows junctions as symlinks,
+// and [Symlink] links a directory with a junction where Windows refuses the
+// account a symlink.
 package hostfile
 
 import "os"

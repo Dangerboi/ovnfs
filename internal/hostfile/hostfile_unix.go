@@ -18,5 +18,8 @@ func Remove(name string) error { return os.Remove(name) }
 // CreateTemp is [os.CreateTemp].
 func CreateTemp(dir, pattern string) (*os.File, error) { return os.CreateTemp(dir, pattern) }
 
+// Symlink is [os.Symlink]; every Unix account may create symlinks.
+func Symlink(target, link string) error { return os.Symlink(target, link) }
+
 // Linked returns info: Unix has no junctions.
 func Linked(_ string, info os.FileInfo) os.FileInfo { return info }
