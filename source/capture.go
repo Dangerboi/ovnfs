@@ -279,7 +279,7 @@ func (w *walker) dir(ctx context.Context, rel string) (bool, error) {
 	}
 	decided := make([]decision, len(entries))
 	for i, e := range entries {
-		if e.Name() == ".git" {
+		if e.Name() == ".git" || IsJJPath(path.Join(rel, e.Name())) {
 			continue
 		}
 		info, err := l.infos[i], l.errs[i]
@@ -302,6 +302,9 @@ func (w *walker) dir(ctx context.Context, rel string) (bool, error) {
 	for i, e := range entries {
 		name := e.Name()
 		p := path.Join(rel, name)
+		if IsJJPath(p) {
+			continue // the jj adapter's: each checkout gets a workspace of its own
+		}
 		if name == ".git" {
 			// The git adapter owns .git: the root's and an absorbed submodule's are
 			// replaced by private git directories; any other nested repository's

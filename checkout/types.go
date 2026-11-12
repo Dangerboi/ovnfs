@@ -46,9 +46,10 @@ type checkoutMeta struct {
 	// named after the checkout: a checkout prepared before its name was known.
 	Dir     string    `json:"dir,omitempty"`
 	Base    string    `json:"base"`
-	Parent  *string   `json:"parent"` // snapshot the checkout was created from
-	Head    *string   `json:"head"`   // the checkout's latest snapshot
-	Git     bool      `json:"git"`    // the checkout has a private git directory
+	Parent  *string   `json:"parent"`       // snapshot the checkout was created from
+	Head    *string   `json:"head"`         // the checkout's latest snapshot
+	Git     bool      `json:"git"`          // the checkout has a private git directory
+	JJ      string    `json:"jj,omitempty"` // its jj workspace's name, its .jj at the upper's root (see addWorkspace)
 	Created time.Time `json:"created"`
 	// MergeBases maps a merge source (applySource, or pullSource of an attached
 	// lane) to a store tree of the incoming leaves its merges left conflict

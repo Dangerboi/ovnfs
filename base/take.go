@@ -113,7 +113,7 @@ func takeCapture(ctx context.Context, c Config, set rules.Set, res *source.Resul
 	}
 	protected := func(p string) bool {
 		for prefix := p; prefix != "."; prefix = path.Dir(prefix) {
-			if prefix == ".git" {
+			if prefix == ".git" || prefix == ".jj" {
 				return true
 			}
 			if _, ok := res.Roots[prefix]; ok {

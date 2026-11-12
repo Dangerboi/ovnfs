@@ -16,11 +16,15 @@ import (
 const maxPaths = 20
 
 // Explain classifies p the way a capture would and reports whether it exists in view.
-// Paths at or below a .git entry belong to the git adapter, not to the rules.
+// Paths at or below a .git entry belong to the git adapter, and the root's .jj
+// to the jj adapter, not to the rules.
 func Explain(view View, d *Domains, set rules.Set, p string) (rules.Decision, bool) {
 	p = strings.Trim(path.Clean("/"+p), "/")
 	_, err := view.Lstat(p)
 	exists := err == nil
+	if IsJJPath(p) {
+		return rules.Decision{Class: rules.Hidden, At: ".jj", Rule: rules.Rule{Class: rules.Hidden, Text: "jj workspace state: each checkout gets a workspace of its own", Origin: "jj adapter"}}, exists
+	}
 	if IsGitPath(p) {
 		at := p
 		for !strings.HasSuffix(at, ".git") || (at != ".git" && !strings.HasSuffix(at, "/.git")) {

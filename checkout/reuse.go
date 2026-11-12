@@ -114,7 +114,7 @@ func (r *Registry) newOnFolder(ctx context.Context, root string, m manifest.Mani
 			return api.NewReply{}, failure("io", "registry is closed")
 		}
 		if synced && f.warm != nil && f.warmGen == arrived && f.warmLock == hash && r.watcher.Covers(root) {
-			return r.openWarmLocked(f, name)
+			return r.openWarmLocked(ctx, f, name)
 		}
 		ch := f.capturing
 		if ch == nil {
@@ -157,7 +157,7 @@ func (r *Registry) newOnFolder(ctx context.Context, root string, m manifest.Mani
 		// generations it is known unchanged from move on.
 		f.warmGen, f.warmGitGen = began, beganGit
 		endCapture()
-		reply, err := r.openWarmLocked(f, name)
+		reply, err := r.openWarmLocked(ctx, f, name)
 		r.mu.Lock()
 		r.releaseLocked(b, nil)
 		r.mu.Unlock()
@@ -194,9 +194,9 @@ func (r *Registry) newOnFolder(ctx context.Context, root string, m manifest.Mani
 			r.templateLater(f, b)
 		}
 		endCapture()
-		reply, err = r.openWarmLocked(f, name)
+		reply, err = r.openWarmLocked(ctx, f, name)
 	} else {
-		reply, err = r.openOnLocked(b, template, name, filepath.Base(root), nil)
+		reply, err = r.openOnLocked(ctx, b, template, name, filepath.Base(root), nil)
 	}
 	r.mu.Lock()
 	r.releaseLocked(b, nil)
@@ -350,9 +350,9 @@ func (f *reuseFolder) poolTarget() int {
 // openWarmLocked opens checkout name (or one derived from the folder) on f's warm
 // capture, taking a prepared one when the pool holds one. r.mu is held and released
 // before it returns.
-func (r *Registry) openWarmLocked(f *reuseFolder, name string) (api.NewReply, error) {
+func (r *Registry) openWarmLocked(ctx context.Context, f *reuseFolder, name string) (api.NewReply, error) {
 	f.warmUsed = time.Now()
-	return r.openOnLocked(f.warm, f.template, name, filepath.Base(f.root), f)
+	return r.openOnLocked(ctx, f.warm, f.template, name, filepath.Base(f.root), f)
 }
 
 // pending reports whether ch, a base's template signal, is still open.
@@ -372,7 +372,7 @@ func pending(ch chan struct{}) bool {
 // capture id as it was taken: no layers, and the private git directory checkouts
 // opened on it then started from. A capture of a repository that kept none (see
 // writeTemplate) is refused.
-func (r *Registry) newOnBase(id, name string) (api.NewReply, error) {
+func (r *Registry) newOnBase(ctx context.Context, id, name string) (api.NewReply, error) {
 	r.mu.Lock()
 	b := r.bases[id]
 	if b != nil && pending(b.template) {
@@ -403,15 +403,16 @@ func (r *Registry) newOnBase(id, name string) (api.NewReply, error) {
 		}
 		template.config = string(data)
 	}
-	return r.openOnLocked(b, template, name, filepath.Base(b.view.Capture().Stats.Root), nil)
+	return r.openOnLocked(ctx, b, template, name, filepath.Base(b.view.Capture().Stats.Root), nil)
 }
 
 // openOnLocked opens checkout name (or one derived from fallback) on capture b,
 // whose checkouts copy the private git directory template: one
 // taken from f's pool when f is set and it holds one, else one prepared now outside
-// the lock while its name is reserved and b retained. Publication shares a durable
-// state write with concurrent creates. r.mu is held and released before it returns.
-func (r *Registry) openOnLocked(b *baseRecord, template gitTemplate, name, fallback string, f *reuseFolder) (api.NewReply, error) {
+// the lock while its name is reserved and b retained, made a jj workspace there
+// when b's folder is a jj workspace's root. Publication shares a durable state
+// write with concurrent creates. r.mu is held and released before it returns.
+func (r *Registry) openOnLocked(ctx context.Context, b *baseRecord, template gitTemplate, name, fallback string, f *reuseFolder) (api.NewReply, error) {
 	name, err := r.pickNameLocked(name, fallback)
 	if err != nil {
 		r.mu.Unlock()
@@ -436,6 +437,13 @@ func (r *Registry) openOnLocked(b *baseRecord, template gitTemplate, name, fallb
 	} else {
 		h, err = r.prepareOnWarm(b, template.dir, name, name)
 	}
+	var ws jjWorkspace
+	var warnings []string
+	if err == nil {
+		ws, warnings = r.addWorkspace(ctx, b, name)
+		err = r.installWorkspace(h, ws)
+	}
+	defer r.discardWorkspace(ws)
 	r.mu.Lock()
 	if err == nil && r.closed {
 		err = failure("io", "registry is closed")
@@ -451,7 +459,7 @@ func (r *Registry) openOnLocked(b *baseRecord, template gitTemplate, name, fallb
 	// The capture was taken before this create, which read nothing of the folder.
 	stats := h.base.view.Capture().Stats
 	stats.Hashed, stats.HashedBytes, stats.Seconds = 0, 0, 0
-	reply := api.NewReply{Checkout: r.checkoutLocked(h), Capture: &stats, Warnings: []string{}}
+	reply := api.NewReply{Checkout: r.checkoutLocked(h), Capture: &stats, Warnings: append([]string{}, warnings...)}
 	r.mu.Unlock()
 	if err := r.commitState(seq); err != nil {
 		r.mu.Lock()
@@ -514,7 +522,7 @@ func (r *Registry) abandonCheckout(name string, h *checkoutRecord, b *baseRecord
 		h.fs.CloseFiles()
 		dir, b = h.meta.dir(), h.base
 	}
-	err := coded(errors.Join(cause, removeTree(r.upperPath(dir)), removeTree(r.gitdirPath(dir))))
+	err := coded(errors.Join(cause, r.removeCheckoutFiles(dir)))
 	r.mu.Lock()
 	delete(r.reserved, name)
 	r.releaseLocked(b, nil)
@@ -567,7 +575,7 @@ func (r *Registry) fillPool(f *reuseFolder) {
 		r.mu.Unlock()
 		if err != nil {
 			if dir != "" {
-				err = errors.Join(err, removeTree(r.upperPath(dir)), removeTree(r.gitdirPath(dir)))
+				err = errors.Join(err, r.removeCheckoutFiles(dir))
 			}
 			r.enqueueNotice(baseNotice{base: b.view.Meta().ID, fault: "prepare checkout: " + err.Error()})
 			r.mu.Lock()
@@ -587,7 +595,7 @@ func (r *Registry) discardPrepared(pool []*checkoutRecord) {
 		h.fs.Discard()
 		h.fs.CloseFiles()
 		dir := h.meta.dir()
-		if err := errors.Join(removeTree(r.upperPath(dir)), removeTree(r.gitdirPath(dir))); err != nil {
+		if err := r.removeCheckoutFiles(dir); err != nil {
 			r.enqueueNotice(baseNotice{base: h.meta.Base, fault: "remove prepared checkout: " + err.Error()})
 		}
 	}

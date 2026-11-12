@@ -12,6 +12,7 @@ import (
 
 	"github.com/stencil-hq/ovnfs/base"
 	"github.com/stencil-hq/ovnfs/internal/durable"
+	"github.com/stencil-hq/ovnfs/jj"
 	"github.com/stencil-hq/ovnfs/overlay"
 )
 
@@ -325,6 +326,17 @@ func writeStateMode(dir string, d diskState, syncCommit bool) error {
 // exists reports whether a path survived an interrupted operation.
 func exists(path string) bool { _, err := os.Lstat(path); return err == nil }
 
+// moveWorkspace moves the jj workspace at the root of host directory from to
+// the root of to, unless to has one or from has none: a freeze moves a
+// checkout's .jj out of its frozen upper (see freezeLocked).
+func moveWorkspace(from, to string) error {
+	src, dst := filepath.Join(from, jj.Dir), filepath.Join(to, jj.Dir)
+	if !exists(src) || exists(dst) {
+		return nil
+	}
+	return os.Rename(src, dst)
+}
+
 // recoverIntents finishes freezes and removals and rolls back unpublished creates.
 func recoverIntents(state string, d *diskState) error {
 	for _, intent := range d.Intents {
@@ -348,12 +360,8 @@ func recoverIntents(state string, d *diskState) error {
 			if hi >= 0 {
 				continue
 			}
-			if err := removeTree(upper); err != nil {
-				return err
-			}
-			if err := removeTree(gitdir); err != nil {
-				return err
-			}
+			// Its upper and git directory are leftovers that removeOrphansLocked
+			// removes, forgetting a jj workspace the upper holds.
 			if intent.Layer != "" && !baseUsed(d, intent.Layer) {
 				if err := os.RemoveAll(filepath.Join(state, "bases", intent.Layer)); err != nil {
 					return err
@@ -395,8 +403,18 @@ func recoverIntents(state string, d *diskState) error {
 						return err
 					}
 				}
+				if frozen && h.JJ != "" {
+					if err := moveWorkspace(layerDir, upper); err != nil {
+						return err
+					}
+				}
 			} else {
 				if frozen && hi >= 0 {
+					if d.Checkouts[hi].JJ != "" {
+						if err := moveWorkspace(upper, layerDir); err != nil {
+							return err
+						}
+					}
 					if err := removeTree(upper); err != nil {
 						return err
 					}
@@ -412,12 +430,7 @@ func recoverIntents(state string, d *diskState) error {
 				}
 			}
 		case "removing":
-			if err := removeTree(gitdir); err != nil {
-				return err
-			}
-			if err := removeTree(upper); err != nil {
-				return err
-			}
+			// Its files are leftovers, as an unpublished create's are.
 			if hi >= 0 {
 				d.Checkouts = append(d.Checkouts[:hi], d.Checkouts[hi+1:]...)
 			}

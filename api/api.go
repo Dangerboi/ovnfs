@@ -25,6 +25,7 @@ type Checkout struct {
 	Base    string    `json:"base"`             // frozen capture the checkout sits on
 	Parent  string    `json:"parent,omitempty"` // snapshot the checkout was created from
 	Git     bool      `json:"git"`              // a working .git exists inside the checkout
+	JJ      string    `json:"jj,omitempty"`     // the checkout's jj workspace in its source's repository, when it is one
 	Dirty   bool      `json:"dirty"`            // changes since the last snapshot
 	Created time.Time `json:"created"`
 	Touched time.Time `json:"touched"` // last change to its files or git state; Created until then
@@ -142,10 +143,12 @@ type ForkArgs struct {
 	Label    string `json:"label,omitempty"`
 }
 
-// ForkReply returns the parent's new snapshot and the child checkout.
+// ForkReply returns the parent's new snapshot and the child checkout, with
+// warnings about the child.
 type ForkReply struct {
 	Snapshot Snapshot `json:"snapshot"`
 	Checkout Checkout `json:"checkout"`
+	Warnings []string `json:"warnings"`
 }
 
 // SnapArgs freezes a checkout's changes into a snapshot.

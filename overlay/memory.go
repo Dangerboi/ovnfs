@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -591,11 +592,17 @@ func (f *FS) Discard() {
 	}
 }
 
-// Unflushed reports whether some file data lives only in memory.
-func (f *FS) Unflushed() bool {
+// Unflushed reports whether some file data lives only in memory, leaving out
+// files at or below any of the paths except.
+func (f *FS) Unflushed(except ...string) bool {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	return len(f.files) != 0
+	for p := range f.files {
+		if !slices.ContainsFunc(except, func(dir string) bool { return p == dir || strings.HasPrefix(p, dir+"/") }) {
+			return true
+		}
+	}
+	return false
 }
 
 // writable reports an access mode that permits writes.

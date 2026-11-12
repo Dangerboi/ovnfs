@@ -96,7 +96,9 @@ handle the common cases; `.o2/ovnfs.yml` and `--rule` override them, and
 Writes go to the checkout's own copy-on-write layer, so the folder is never
 written until you `apply`. In a git repository the checkout gets a private git
 directory: commit freely, then `apply --branch NAME` to bring the commits back,
-or `git fetch ovnfs/NAME` them from its git remote.
+or `git fetch ovnfs/NAME` them from its git remote. In a
+[jj](https://jj-vcs.github.io/jj/) repository each checkout is also a jj
+workspace of it.
 
 ovnfs isolates files, not processes: it is not a sandbox.
 

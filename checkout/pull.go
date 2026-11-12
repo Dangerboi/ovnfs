@@ -72,7 +72,7 @@ func (r *Registry) MergePull(ctx context.Context, args api.PullArgs, from store.
 		return api.PullReply{}, err
 	}
 	for p := range union(pulled.Base, pulled.Files) {
-		if p == "" || p != overlay.Clean(p) || source.IsGitPath(p) || strings.Contains(p, "\\") {
+		if p == "" || p != overlay.Clean(p) || source.IsGitPath(p) || source.IsJJPath(p) || strings.Contains(p, "\\") {
 			return api.PullReply{}, failure("invalid", "remote pull contains invalid source path %q", p)
 		}
 	}

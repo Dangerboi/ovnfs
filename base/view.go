@@ -61,6 +61,7 @@ func (v bottom) ReadDir(p string) ([]os.FileInfo, error) {
 	}
 	if p == "" {
 		delete(names, ".git")
+		delete(names, ".jj")
 	}
 	ordered := make([]string, 0, len(names))
 	for name := range names {
@@ -206,7 +207,7 @@ func (v bottom) CopyTo(p, dst string) error {
 // resolve finds what serves p: a host path (the folder's own entry) with its
 // current metadata, or "" with captured metadata when the captured blob serves it.
 func (b *Base) resolve(p string) (string, os.FileInfo, error) {
-	if p == ".git" || strings.HasPrefix(p, ".git/") {
+	if p == ".git" || strings.HasPrefix(p, ".git/") || source.IsJJPath(p) {
 		return "", nil, absent(p)
 	}
 	if e, ok := b.sources[p]; ok {
@@ -323,13 +324,14 @@ func (b *Base) Live(p string) bool {
 
 // Affects reports whether an edit at folder path p can make the folder differ
 // from the capture: false only below a cache, local or hidden root, which the
-// capture never descended. A name the capture never saw counts, since it may
-// be source. Remote bases have no folder to edit.
+// capture never descended, and in the root's .jj, which captures leave out. A
+// name the capture never saw counts, since it may be source. Remote bases have
+// no folder to edit.
 func (b *Base) Affects(p string) bool {
-	if b.remote != nil {
+	p = cleanPath(p)
+	if b.remote != nil || source.IsJJPath(p) {
 		return false
 	}
-	p = cleanPath(p)
 	prefix := ""
 	for component := range strings.SplitSeq(p, "/") {
 		prefix = path.Join(prefix, component)

@@ -306,6 +306,10 @@ func parent(p string) string {
 	return ""
 }
 
+// IsJJPath reports a path that the jj adapter owns: the root's .jj, a jj
+// workspace's state, or anything below it.
+func IsJJPath(p string) bool { return p == ".jj" || strings.HasPrefix(p, ".jj/") }
+
 // IsGitPath reports a path that the git adapter owns: a .git entry or anything below one.
 func IsGitPath(p string) bool {
 	for part := range strings.SplitSeq(p, "/") {

@@ -20,6 +20,7 @@ import (
 	"github.com/stencil-hq/ovnfs/base"
 	"github.com/stencil-hq/ovnfs/git"
 	"github.com/stencil-hq/ovnfs/internal/durable"
+	"github.com/stencil-hq/ovnfs/jj"
 	"github.com/stencil-hq/ovnfs/manifest"
 	"github.com/stencil-hq/ovnfs/overlay"
 	"github.com/stencil-hq/ovnfs/source"
@@ -62,7 +63,7 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 		if args.Rev != "" || len(args.Take) != 0 || len(args.Rules) != 0 {
 			return api.NewReply{}, failure("invalid", "a checkout on a capture keeps its revision, takes and rules")
 		}
-		return r.newOnBase(args.Base, args.Name)
+		return r.newOnBase(ctx, args.Base, args.Name)
 	}
 	if args.Snapshot != "" {
 		if args.Rev != "" {
@@ -74,37 +75,50 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 		if len(args.Rules) != 0 {
 			return api.NewReply{}, failure("invalid", "rules are fixed when a folder is captured; a checkout from a snapshot keeps its base's rules")
 		}
-		r.mu.RLock()
+		r.mu.Lock()
 		s := r.snapshots[args.Snapshot]
 		var tree store.OID
-		var baseID string
-		if s != nil {
+		var baseID, name string
+		var err error
+		switch {
+		case r.closed:
+			err = failure("io", "registry is closed")
+		case s == nil:
+			err = failure("not_found", "no snapshot %s", args.Snapshot)
+		default:
 			tree, baseID = s.git, s.base.view.Meta().ID
+			name, err = r.reserveNameLocked(args.Name, s.meta.Checkout)
 		}
-		r.mu.RUnlock()
-		if s == nil {
-			return api.NewReply{}, failure("not_found", "no snapshot %s", args.Snapshot)
+		r.mu.Unlock()
+		if err != nil {
+			return api.NewReply{}, err
 		}
+		reserved := true // until createFromSnapshotLocked takes the name over
+		defer func() {
+			if reserved {
+				r.unreserve(name)
+			}
+		}()
 		ready, err := r.prepareGit(ctx, tree, filepath.Join(r.snapshotDir(s.meta.ID), "git"), baseID)
 		if err != nil {
 			return api.NewReply{}, coded(err)
 		}
+		ws, warnings := r.addWorkspace(ctx, s.base, name)
+		defer r.discardWorkspace(ws)
 		r.mu.Lock()
 		var h *checkoutRecord
-		var name string
 		switch {
 		case r.closed:
 			err = failure("io", "registry is closed")
 		case r.snapshots[args.Snapshot] != s:
 			err = failure("not_found", "no snapshot %s", args.Snapshot)
 		default:
-			if name, err = r.pickNameLocked(args.Name, s.meta.Checkout); err == nil {
-				h, err = r.createFromSnapshotLocked(ctx, name, s, ready)
-			}
+			reserved = false
+			h, err = r.createFromSnapshotLocked(ctx, name, s, ready, ws)
 		}
 		var reply api.NewReply
 		if err == nil {
-			reply = api.NewReply{Checkout: r.checkoutLocked(h), Warnings: []string{}}
+			reply = api.NewReply{Checkout: r.checkoutLocked(h), Warnings: append([]string{}, warnings...)}
 		}
 		r.mu.Unlock()
 		if discardErr := discardGit(ready); err == nil && discardErr != nil {
@@ -234,7 +248,7 @@ func (r *Registry) capture(ctx context.Context, root string, m manifest.Manifest
 		return api.NewReply{}, nil, err
 	}
 	stats := view.Capture().Stats
-	reply.Capture, reply.Warnings = &stats, append([]string{}, warnings...)
+	reply.Capture, reply.Warnings = &stats, append(append([]string{}, warnings...), reply.Warnings...)
 	return reply, b, nil
 }
 
@@ -279,7 +293,7 @@ func (r *Registry) publishReused(ctx context.Context, name, stateDir string, b *
 	if err != nil {
 		return api.NewReply{}, err
 	}
-	reply.Capture, reply.Warnings = &stats, append([]string{}, warnings...)
+	reply.Capture, reply.Warnings = &stats, append(append([]string{}, warnings...), reply.Warnings...)
 	return reply, nil
 }
 
@@ -320,8 +334,11 @@ func submodules(view *base.Base) []source.Repo {
 	return out
 }
 
-// publishBase registers a new or retained base and opens the reserved checkout on it.
+// publishBase registers a new or retained base and opens the reserved checkout
+// on it, a jj workspace when b's folder is a jj workspace's root.
 func (r *Registry) publishBase(ctx context.Context, name, id string, b *baseRecord, gs gitSource) (api.NewReply, error) {
+	ws, warnings := r.addWorkspace(ctx, b, name)
+	defer r.discardWorkspace(ws)
 	r.mu.Lock()
 	r.bases[id] = b
 	r.wakeWatch()
@@ -329,12 +346,12 @@ func (r *Registry) publishBase(ctx context.Context, name, id string, b *baseReco
 	var reply api.NewReply
 	if err == nil {
 		var h *checkoutRecord
-		if h, err = r.installCheckoutLocked(ctx, name, b, nil, nil, gs); err == nil {
+		if h, err = r.installCheckoutLocked(ctx, name, b, nil, nil, gs, ws); err == nil {
 			delete(r.reserved, name)
 			delete(r.intents, name)
 			r.moveRootLocked()
 			if err = r.persistLocked(); err == nil {
-				reply = api.NewReply{Checkout: r.checkoutLocked(h), Warnings: []string{}}
+				reply = api.NewReply{Checkout: r.checkoutLocked(h), Warnings: append([]string{}, warnings...)}
 			} else {
 				delete(r.checkouts, name)
 				r.releaseLocked(b, nil)
@@ -342,7 +359,7 @@ func (r *Registry) publishBase(ctx context.Context, name, id string, b *baseReco
 		}
 	}
 	if err != nil {
-		cleanupErr := errors.Join(removeTree(r.upperPath(name)), removeTree(r.gitdirPath(name)))
+		cleanupErr := r.removeCheckoutFiles(name)
 		delete(r.reserved, name)
 		delete(r.intents, name)
 		persistErr := r.persistLocked()
@@ -384,7 +401,7 @@ func (r *Registry) newOverlappingMount(ctx context.Context, dir string, args api
 	if err != nil {
 		return api.NewReply{}, true, err
 	}
-	return api.NewReply{Checkout: f.Checkout, Warnings: []string{fmt.Sprintf("%s is checkout %s: forked it at %s", dir, name, f.Snapshot.ID)}}, true, nil
+	return api.NewReply{Checkout: f.Checkout, Warnings: append([]string{fmt.Sprintf("%s is checkout %s: forked it at %s", dir, name, f.Snapshot.ID)}, f.Warnings...)}, true, nil
 }
 
 // underMount returns dir relative to the daemon's mount when dir is the mount or below it.
@@ -526,6 +543,25 @@ func (r *Registry) pickNameLocked(name, hint string) (string, error) {
 	}
 }
 
+// reserveNameLocked picks a name as pickNameLocked does and reserves it for a
+// create that leaves the registry lock before registering its checkout, to make
+// its jj workspace; createFromSnapshotLocked takes the reservation over, and
+// unreserve frees it for a create that fails before.
+func (r *Registry) reserveNameLocked(name, hint string) (string, error) {
+	name, err := r.pickNameLocked(name, hint)
+	if err == nil {
+		r.reserved[name] = true
+	}
+	return name, err
+}
+
+// unreserve frees a name reserveNameLocked reserved.
+func (r *Registry) unreserve(name string) {
+	r.mu.Lock()
+	delete(r.reserved, name)
+	r.mu.Unlock()
+}
+
 // sanitizeName maps a folder name onto the checkout-name grammar.
 func sanitizeName(hint string) string {
 	var b strings.Builder
@@ -547,14 +583,17 @@ func sanitizeName(hint string) string {
 	return name
 }
 
-// installCheckoutLocked creates the upper and private git directory and registers
-// the checkout before publication.
-func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *baseRecord, stack []string, parent *string, gs gitSource) (*checkoutRecord, error) {
+// installCheckoutLocked creates the upper and private git directory, installs
+// the jj workspace ws, and registers the checkout before publication.
+func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *baseRecord, stack []string, parent *string, gs gitSource, ws jjWorkspace) (*checkoutRecord, error) {
 	layers, err := r.layerStackLocked(stack, b.view.Meta().ID)
 	if err != nil {
 		return nil, err
 	}
 	h, err := r.prepareCheckout(name, name, b, layers, stack, parent, gs, r.lineageCheckoutsLocked(deref(parent)))
+	if err == nil {
+		err = r.installWorkspace(h, ws)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -842,16 +881,19 @@ func writeGitfileAt(fsys *overlay.FS, p, gitdir string) error {
 	return fsys.Chtimes(path.Dir(p), dir.ModTime(), dir.ModTime())
 }
 
-// createFromSnapshotLocked attaches a new checkout to a snapshot's stack and to the git
-// directory prepareGit made from it (ready, "" for none), publishing it with one
-// durable state write. It needs no recovery intent: the registry holds its lock
-// throughout, the snapshot already retains the base, and reopening after a crash
-// removes the upper and git directory of a checkout the state does not name.
-func (r *Registry) createFromSnapshotLocked(ctx context.Context, name string, s *snapRecord, ready string) (*checkoutRecord, error) {
+// createFromSnapshotLocked attaches a new checkout to a snapshot's stack, to the git
+// directory prepareGit made from it (ready, "" for none) and to the jj workspace
+// ws, publishing it with one durable state write; the reservation of name
+// (reserveNameLocked) ends here. It needs no recovery intent: the
+// registry holds its lock throughout, the snapshot already retains the base, and
+// reopening after a crash removes the upper and git directory of a checkout the
+// state does not name.
+func (r *Registry) createFromSnapshotLocked(ctx context.Context, name string, s *snapRecord, ready string, ws jjWorkspace) (*checkoutRecord, error) {
+	delete(r.reserved, name)
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	h, err := r.installCheckoutLocked(ctx, name, s.base, s.stack, &s.meta.ID, gitSource{ready: ready})
+	h, err := r.installCheckoutLocked(ctx, name, s.base, s.stack, &s.meta.ID, gitSource{ready: ready}, ws)
 	if err == nil {
 		r.moveRootLocked()
 		if err = r.persistLocked(); err == nil {
@@ -860,7 +902,7 @@ func (r *Registry) createFromSnapshotLocked(ctx context.Context, name string, s 
 		delete(r.checkouts, name)
 		r.releaseLocked(s.base, s.stack)
 	}
-	return nil, errors.Join(err, removeTree(r.upperPath(name)), removeTree(r.gitdirPath(name)), r.persistLocked())
+	return nil, errors.Join(err, r.removeCheckoutFiles(name), r.persistLocked())
 }
 
 // created adds the checkout's git remote (syncRemotes) and notifies export
@@ -930,8 +972,9 @@ func (r *Registry) waitHashed(ctx context.Context, s *snapRecord) (api.SnapReply
 }
 
 // Fork freezes and creates under one registry lock so no competing registry mutation
-// interleaves; the git directory is stored and the child's copy written before it, and
-// the freeze and the child are published by one durable state write.
+// interleaves; the child's name is reserved, the git directory stored and the child's
+// copy and jj workspace made before it, and the freeze and the child are published by
+// one durable state write.
 func (r *Registry) Fork(ctx context.Context, args api.ForkArgs) (api.ForkReply, error) {
 	if err := checkContext(ctx); err != nil {
 		return api.ForkReply{}, err
@@ -940,6 +983,18 @@ func (r *Registry) Fork(ctx context.Context, args api.ForkArgs) (api.ForkReply, 
 	if err != nil {
 		return api.ForkReply{}, err
 	}
+	r.mu.Lock()
+	child, err := r.reserveNameLocked(args.Name, args.Checkout)
+	r.mu.Unlock()
+	if err != nil {
+		return api.ForkReply{}, err
+	}
+	reserved := true // until createFromSnapshotLocked takes the name over
+	defer func() {
+		if reserved {
+			r.unreserve(child)
+		}
+	}()
 	tree, err := r.saveGit(h)
 	if err != nil {
 		return api.ForkReply{}, coded(err)
@@ -949,19 +1004,15 @@ func (r *Registry) Fork(ctx context.Context, args api.ForkArgs) (api.ForkReply, 
 		return api.ForkReply{}, coded(err)
 	}
 	defer discardGit(ready)
+	ws, warnings := r.addWorkspace(ctx, h.base, child)
+	defer r.discardWorkspace(ws)
 	if err = r.freezeAndLock(h); err != nil {
 		return api.ForkReply{}, err
 	}
-	child := ""
 	if h.meta.Base != baseID {
-		err = failure("conflict", "checkout %s moved to another base while forking; retry", h.meta.Name)
-	} else {
-		child, err = r.pickNameLocked(args.Name, args.Checkout)
-	}
-	if err != nil {
 		h.freeze.Unlock()
 		r.mu.Unlock()
-		return api.ForkReply{}, err
+		return api.ForkReply{}, failure("conflict", "checkout %s moved to another base while forking; retry", h.meta.Name)
 	}
 	s, err := r.freezeLocked(ctx, h, args.Label, tree, false)
 	h.freeze.Unlock()
@@ -970,7 +1021,8 @@ func (r *Registry) Fork(ctx context.Context, args api.ForkArgs) (api.ForkReply, 
 		return api.ForkReply{}, coded(err)
 	}
 	result := snapshotOf(s.meta)
-	created, createErr := r.createFromSnapshotLocked(ctx, child, s, ready)
+	reserved = false
+	created, createErr := r.createFromSnapshotLocked(ctx, child, s, ready, ws)
 	var childCheckout api.Checkout
 	if createErr != nil {
 		// The freeze stays published even when its child is not.
@@ -990,33 +1042,44 @@ func (r *Registry) Fork(ctx context.Context, args api.ForkArgs) (api.ForkReply, 
 	if createErr != nil {
 		return api.ForkReply{}, coded(createErr)
 	}
-	return api.ForkReply{Snapshot: result, Checkout: childCheckout}, nil
+	return api.ForkReply{Snapshot: result, Checkout: childCheckout, Warnings: append([]string{}, warnings...)}, nil
 }
 
 // upperEmpty excludes only infrastructure: the work directory, the root's gitfile,
-// and the gitfiles installGitfiles wrote into the upper (absolute, into the
-// checkout's own private git directory) together with the directories it copied
-// up to hold them (checkoutMeta.Copied), as long as those keep the metadata they
-// were copied with. Every real change requires a layer.
+// the checkout's jj workspace, and the gitfiles installGitfiles wrote into the
+// upper (absolute, into the checkout's own private git directory) together with
+// the directories it copied up to hold them (checkoutMeta.Copied), as long as
+// those keep the metadata they were copied with. Every real change requires a layer.
 func (r *Registry) upperEmpty(h *checkoutRecord) (bool, error) {
-	if h.fs.Unflushed() {
+	in := infra{copied: h.meta.Copied, workspace: h.meta.JJ != ""}
+	var workspace []string // memory files there are no change either
+	if in.workspace {
+		workspace = []string{jj.Dir}
+	}
+	if h.fs.Unflushed(workspace...) {
 		return false, nil
 	}
-	own := ""
 	if h.meta.Git {
-		own = r.gitdirPath(h.meta.dir())
+		in.gitdir = r.gitdirPath(h.meta.dir())
 	}
-	empty, _, err := infraOnly(h.fs, h.upper, "", own, h.meta.Copied)
+	empty, _, err := infraOnly(h.fs, h.upper, "", in)
 	return empty, err
+}
+
+// infra is what of a checkout's upper is infrastructure (see upperEmpty).
+type infra struct {
+	gitdir    string               // the checkout's private git directory; "" for none
+	copied    map[string]copiedDir // checkoutMeta.Copied
+	workspace bool                 // the root's .jj is the checkout's jj workspace
 }
 
 // infraOnly reports whether the upper directory dir, at checkout path rel, holds
 // nothing but infrastructure (see upperEmpty), and whether it holds a gitfile into
-// own, the checkout's private git directory ("" for none). A directory counts only
-// when it was copied up for gitfiles, holds one, and keeps the mode and mtime
-// copied records for it; otherwise it is a change (a chmod, a touch, or a removal
-// that left it without a gitfile).
-func infraOnly(fsys *overlay.FS, dir, rel, own string, copied map[string]copiedDir) (empty, gitfiles bool, err error) {
+// the checkout's private git directory. A directory counts only when it was copied
+// up for gitfiles, holds one, and keeps the mode and mtime copied records for it;
+// otherwise it is a change (a chmod, a touch, or a removal that left it without a
+// gitfile).
+func infraOnly(fsys *overlay.FS, dir, rel string, in infra) (empty, gitfiles bool, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false, false, err
@@ -1024,19 +1087,19 @@ func infraOnly(fsys *overlay.FS, dir, rel, own string, copied map[string]copiedD
 	for _, entry := range entries {
 		p := path.Join(rel, entry.Name())
 		switch {
-		case p == ".git" || p == ".wh..wh.work":
-		case own != "" && entry.Name() == ".git" && entry.Type().IsRegular():
+		case p == ".git" || p == ".wh..wh.work" || (p == jj.Dir && in.workspace):
+		case in.gitdir != "" && entry.Name() == ".git" && entry.Type().IsRegular():
 			content, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 			if err != nil {
 				return false, false, err
 			}
 			target, _ := git.ParseGitfile(content)
-			if !filepath.IsAbs(target) || !strings.HasPrefix(target, own+string(filepath.Separator)) {
+			if !filepath.IsAbs(target) || !strings.HasPrefix(target, in.gitdir+string(filepath.Separator)) {
 				return false, false, nil
 			}
 			gitfiles = true
 		case entry.IsDir():
-			was, ok := copied[p]
+			was, ok := in.copied[p]
 			if !ok {
 				return false, false, nil
 			}
@@ -1047,7 +1110,7 @@ func infraOnly(fsys *overlay.FS, dir, rel, own string, copied map[string]copiedD
 			if info.Mode() != was.Mode || !info.ModTime().Equal(was.Mtime) {
 				return false, false, nil
 			}
-			ok, held, err := infraOnly(fsys, filepath.Join(dir, entry.Name()), p, own, copied)
+			ok, held, err := infraOnly(fsys, filepath.Join(dir, entry.Name()), p, in)
 			if err != nil || !ok || !held {
 				return false, false, err
 			}
@@ -1168,6 +1231,9 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 		}
 		if renamed {
 			h.meta.Copied = oldCopied
+			if h.meta.JJ != "" {
+				rollbackErr = errors.Join(rollbackErr, moveWorkspace(h.upper, filepath.Join(r.config.State, "layers", layerID)))
+			}
 			if e := removeTree(h.upper); e != nil {
 				rollbackErr = errors.Join(rollbackErr, e)
 			}
@@ -1208,6 +1274,15 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 		layer, indexErr := oldFS.Freeze(layerDir)
 		if indexErr != nil {
 			return rollback(indexErr)
+		}
+		// The jj workspace stays the checkout's: it moves to the fresh upper.
+		if e, ok := layer.Get(jj.Dir); ok && e.Kind != overlay.KindWhiteout && h.meta.JJ != "" {
+			if err = os.MkdirAll(h.upper, 0o755); err == nil {
+				err = layer.Extract(jj.Dir, filepath.Join(h.upper, jj.Dir))
+			}
+			if err != nil {
+				return rollback(err)
+			}
 		}
 		r.layers[layerID] = &layerRecord{id: layerID, base: h.meta.Base, layer: layer}
 		layers, stackErr := r.layerStackLocked(stack, h.meta.Base)
@@ -1308,7 +1383,7 @@ func (r *Registry) remove(ctx context.Context, name string, picked time.Time, st
 	} else if !stickySnapshots {
 		err = r.dropCheckoutSnapshots(name)
 	}
-	removeErr := errors.Join(removeTree(r.gitdirPath(h.meta.dir())), removeTree(h.upper))
+	removeErr := r.removeCheckoutFiles(h.meta.dir())
 	r.mu.Lock()
 	if removeErr == nil {
 		delete(r.reserved, name)

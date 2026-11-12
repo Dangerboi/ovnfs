@@ -143,6 +143,22 @@ func (l *Layer) Children(p string) map[string]Entry { return maps.Clone(l.childr
 // without walking every entry.
 func (l *Layer) GitEntries() []string { return slices.Collect(maps.Keys(l.gits)) }
 
+// Extract moves entry p, with everything below it, out of a layer that
+// [FS.Freeze] just returned and nothing reads yet, to the new host path dst.
+// The directory that held p keeps its indexed modification time.
+func (l *Layer) Extract(p, dst string) error {
+	p = Clean(p)
+	if e, ok := l.entries[p]; p == "" || !ok || e.Kind == KindWhiteout {
+		return &fs.PathError{Op: "extract", Path: p, Err: fs.ErrNotExist}
+	}
+	if err := os.Rename(filepath.Join(l.dir, filepath.FromSlash(p)), dst); err != nil {
+		return err
+	}
+	l.drop(p)
+	dir := l.entries[parent(p)].Info
+	return os.Chtimes(filepath.Join(l.dir, filepath.FromSlash(parent(p))), dir.ModTime(), dir.ModTime())
+}
+
 // Walk visits entries in deterministic pre-order, including the root directory.
 func (l *Layer) Walk(fn func(p string, e Entry) error) error {
 	var visit func(string) error

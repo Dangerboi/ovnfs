@@ -10,7 +10,8 @@ An ovnfs checkout is a copy-on-write view of a folder, served from one mount
 takes about a second at any size and copies nothing. Writes stay in the
 checkout, and the folder is written only when you `apply`. In a git repository
 the checkout gets a private git directory, so commits made inside it stay
-there.
+there. In a jj repository it is also a jj workspace of that repository, named
+after the checkout: use `jj` inside it directly, never `jj git init`.
 
 When you need a second copy of a folder, open an ovnfs checkout instead of
 `git worktree add`, `git clone` or `cp -r`, unless the user asks for one of

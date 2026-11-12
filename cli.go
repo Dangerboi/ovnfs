@@ -337,11 +337,17 @@ func (cmd *newCmd) Run(c *cli) error {
 			}
 			git = strings.Join(repos, ", ")
 		}
+		vcs := "git: " + git
+		if r.Checkout.JJ != "" {
+			vcs += " · jj: " + r.Checkout.JJ
+		}
 		fmt.Fprintf(stderr, "  %s · %s · %s · %s\n",
 			paint(stderr, styleDim, "cache "+commas(int64(cp.Cache))),
 			paint(stderr, styleDim, "local "+commas(int64(cp.Local))),
 			paint(stderr, styleDim, "hidden "+commas(int64(cp.Hidden))),
-			paint(stderr, styleDim, "git: "+git))
+			paint(stderr, styleDim, vcs))
+	} else if r.Checkout.JJ != "" {
+		fmt.Fprintf(stderr, "  %s\n", paint(stderr, styleDim, "jj: "+r.Checkout.JJ))
 	}
 	for _, w := range r.Warnings {
 		fmt.Fprintln(stderr, paint(stderr, styleYellow, "warning:"), w)
@@ -365,6 +371,12 @@ func (cmd *forkCmd) Run(c *cli) error {
 	fmt.Fprintln(stdout, r.Checkout.Path)
 	fmt.Fprintf(stderr, "%s  %s  %s@%s\n", paint(stderr, styleAccent.Bold(true), r.Checkout.Name), paint(stderr, styleDim, "←"),
 		paint(stderr, styleAccent, a.Checkout), paint(stderr, styleDim, r.Snapshot.ID))
+	if r.Checkout.JJ != "" {
+		fmt.Fprintf(stderr, "  %s\n", paint(stderr, styleDim, "jj: "+r.Checkout.JJ))
+	}
+	for _, w := range r.Warnings {
+		fmt.Fprintln(stderr, paint(stderr, styleYellow, "warning:"), w)
+	}
 	return nil
 }
 

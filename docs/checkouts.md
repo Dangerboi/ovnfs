@@ -70,6 +70,36 @@ otherwise at the repository's next create or removal. Manage these remotes
 through ovnfs: `git remote remove ovnfs/NAME` deletes the refs but fails to
 edit the included file.
 
+## jj repositories
+
+A folder whose root is a [jj](https://jj-vcs.github.io/jj/) workspace,
+colocated with git or not, gives each checkout a jj workspace of that
+repository named after the checkout: the repository and its operation log are
+shared, the working copy is the checkout's own. Its working-copy commit starts
+on the parents of the folder workspace's `@`, as `jj workspace add` does, so
+`jj st` in a fresh checkout shows no changes and `jj log` shows every
+checkout's `@` as `NAME@`. When the repository already has a workspace of that
+name, the checkout's is `NAME-2`, or the next free number; `new` and `fork`
+print it as `jj: NAME`.
+
+ovnfs runs `jj workspace add --no-colocate` from `jj` on PATH in an empty
+directory, `STATE/jj/NAME`, which jj records as the workspace's path (`jj
+workspace list` shows it), and moves its `.jj` to the checkout's root; the
+checkout's `.git` stays its private git directory, which jj neither reads nor
+updates. Like any jj command in the
+folder, this snapshots the folder's working copy first, and it writes the full
+tree into that directory: about 0.8 s for 5,000 files on a Mac. Every new
+checkout gets a fresh workspace: `new`, `run`, `fork`, `new --from SNAP` and
+`new --base CAPTURE`. Removing the checkout (`rm`, `prune`, the end of `run`)
+runs `jj workspace forget` for it; a repository that is gone has nothing to
+forget.
+
+The folder's `.jj` never shows in a checkout, and a checkout's `.jj` belongs to
+it alone: `diff`, `apply`, snapshot trees and `plan` leave it out, `snap` and
+`fork` keep it with the checkout instead of in the snapshot, and `ls` does not
+count its changes. Without jj installed the checkout is created without a
+workspace, with a warning. Checkouts attached on another machine get none.
+
 ## Starting from a revision: `--rev`
 
 `ovnfs new [DIR] --rev REV` starts with REV's tracked files and index. A local

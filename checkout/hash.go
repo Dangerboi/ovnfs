@@ -730,9 +730,10 @@ func (t *snapTree) writeDir(w *store.TreeWriter, d *snapDir) (id store.OID, ok b
 	return id, err == nil, err
 }
 
-// hashExcluded keeps .git entries (owned by the git adapter) and AppleDouble sidecars out of trees.
+// hashExcluded keeps .git entries (owned by the git adapter), the root's .jj
+// (the jj adapter's) and AppleDouble sidecars out of trees.
 func hashExcluded(p string) bool {
-	if source.IsGitPath(p) {
+	if source.IsGitPath(p) || source.IsJJPath(p) {
 		return true
 	}
 	for component := range strings.SplitSeq(p, "/") {

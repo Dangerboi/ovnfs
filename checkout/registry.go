@@ -33,7 +33,7 @@ var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 var objectPattern = regexp.MustCompile(`^[bl]_[0-9a-f]{12}$`)
 
 // stateDirs are the registry's subdirectories below State.
-var stateDirs = []string{"bases", "layers", "uppers", "snapshots", "git", "sources"}
+var stateDirs = []string{"bases", "layers", "uppers", "snapshots", "git", "sources", "jj"}
 
 // lockFile holds a base's resolved manifest next to its capture.
 const lockFile = "lock.json"
@@ -520,7 +520,7 @@ func (r *Registry) Counts(s *api.Status) {
 // checkoutLocked describes a checkout for replies.
 func (r *Registry) checkoutLocked(h *checkoutRecord) api.Checkout {
 	empty, err := r.upperEmpty(h)
-	return api.Checkout{Name: h.meta.Name, Path: filepath.Join(r.config.Mount, h.meta.Name), Source: h.source(), Base: h.meta.Base, Parent: deref(h.meta.Parent), Git: h.meta.Git, Dirty: err == nil && !empty, Created: h.meta.Created, Touched: r.touched(h)}
+	return api.Checkout{Name: h.meta.Name, Path: filepath.Join(r.config.Mount, h.meta.Name), Source: h.source(), Base: h.meta.Base, Parent: deref(h.meta.Parent), Git: h.meta.Git, JJ: h.meta.JJ, Dirty: err == nil && !empty, Created: h.meta.Created, Touched: r.touched(h)}
 }
 
 // source is the folder a checkout was opened from; for one attached from another
@@ -927,7 +927,7 @@ func (r *Registry) removeOrphansLocked() error {
 	for _, h := range r.checkouts {
 		dirs[h.meta.dir()] = true
 	}
-	for _, kind := range []string{"bases", "layers", "snapshots", "uppers", "git"} {
+	for _, kind := range []string{"bases", "layers", "snapshots", "uppers", "git", "jj"} {
 		entries, err := os.ReadDir(filepath.Join(r.config.State, kind))
 		if err != nil {
 			return err
@@ -946,6 +946,9 @@ func (r *Registry) removeOrphansLocked() error {
 				retained = dirs[name]
 			}
 			if !retained {
+				if kind == "uppers" || kind == "jj" {
+					r.forgetWorkspace(filepath.Join(r.config.State, kind, name))
+				}
 				if err = removeTree(filepath.Join(r.config.State, kind, name)); err != nil {
 					if kind == "uppers" || kind == "git" {
 						r.reserved[name] = true
