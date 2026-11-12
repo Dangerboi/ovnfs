@@ -8,7 +8,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -51,34 +50,60 @@ func (v bottom) ReadDir(p string) ([]os.FileInfo, error) {
 	if b.Live(p) {
 		return b.liveDir(p)
 	}
-	names := make(map[string]bool)
-	for _, name := range b.children[p] {
-		names[name] = true
-	}
-	if lower, err := os.ReadDir(b.lower(p)); err == nil {
-		for _, e := range lower {
-			names[e.Name()] = true
+	// Both lists are sorted. Native metadata serves every present child;
+	// captured names missing from the host still retain their fork-time info.
+	names := b.children[p]
+	lower, listErr := fsys.ReadDir(b.lower(p))
+	out := make([]os.FileInfo, 0, len(names))
+	for i, j := 0, 0; i < len(names) || j < len(lower); {
+		var name string
+		var entry os.DirEntry
+		switch {
+		case j == len(lower) || i < len(names) && names[i] < lower[j].Name():
+			name = names[i]
+			i++
+		case i == len(names) || lower[j].Name() < names[i]:
+			entry = lower[j]
+			name = entry.Name()
+			j++
+		default:
+			entry = lower[j]
+			name = names[i]
+			i++
+			j++
 		}
-	}
-	if p == "" {
-		delete(names, ".git")
-		delete(names, ".jj")
-	}
-	ordered := make([]string, 0, len(names))
-	for name := range names {
-		ordered = append(ordered, name)
-	}
-	sort.Strings(ordered)
-	out := make([]os.FileInfo, 0, len(ordered))
-	for _, name := range ordered {
-		_, child, err := b.resolve(path.Join(p, name))
+		child := path.Join(p, name)
+		if child == ".git" || source.IsJJPath(child) {
+			continue
+		}
+		e, captured := b.sources[child]
+		if !captured && b.classes[child] != rules.Cache && b.classes[child] != rules.Local {
+			continue
+		}
+		var current os.FileInfo
+		var err error
+		if entry != nil {
+			current, err = entry.Info()
+			if err == nil {
+				current = hostfile.Linked(current, b.meta.Dir, child)
+			}
+		}
+		if listErr != nil || err != nil {
+			_, current, err = b.resolve(child)
+		} else if captured {
+			_, current, err = b.sourceInfo(child, b.lower(child), e, current)
+		} else if !b.lowerAncestorsAreDirs(child) {
+			continue
+		}
 		if err != nil {
 			if os.IsNotExist(err) || isNotDir(err) {
 				continue
 			}
 			return nil, err
 		}
-		out = append(out, child)
+		if current != nil {
+			out = append(out, current)
+		}
 	}
 	return out, nil
 }
@@ -213,27 +238,32 @@ func (b *Base) resolve(p string) (string, os.FileInfo, error) {
 	}
 	if e, ok := b.sources[p]; ok {
 		host := b.lower(p)
-		current, err := hostfile.Lstat(host)
-		if e.mode.IsDir() {
-			if err == nil && current.IsDir() {
-				return host, current, nil
-			}
-			return "", capturedInfo{name: path.Base("/" + p), mode: e.mode, mtime: b.meta.ForkTime}, nil
-		}
-		captured := b.capture.Info[p]
-		if err == nil && b.unchanged(host, current, e, captured) {
-			return host, current, nil
-		}
-		mtime := captured.Mtime
-		if mtime.IsZero() {
-			mtime = b.meta.ForkTime
-		}
-		return "", capturedInfo{name: path.Base(p), mode: e.mode, size: captured.Size, mtime: mtime}, nil
+		current, _ := hostfile.Lstat(host)
+		return b.sourceInfo(p, host, e, current)
 	}
 	if root, live := b.derivedRoot(p); root != "" && live {
 		return b.live(p)
 	}
 	return "", nil, absent(p)
+}
+
+// sourceInfo selects current or captured metadata after a stat or bulk listing.
+func (b *Base) sourceInfo(p, host string, e entry, current os.FileInfo) (string, os.FileInfo, error) {
+	if e.mode.IsDir() {
+		if current != nil && current.IsDir() {
+			return host, current, nil
+		}
+		return "", capturedInfo{name: path.Base("/" + p), mode: e.mode, mtime: b.meta.ForkTime}, nil
+	}
+	captured := b.capture.Info[p]
+	if current != nil && b.unchanged(host, current, e, captured) {
+		return host, current, nil
+	}
+	mtime := captured.Mtime
+	if mtime.IsZero() {
+		mtime = b.meta.ForkTime
+	}
+	return "", capturedInfo{name: path.Base(p), mode: e.mode, size: captured.Size, mtime: mtime}, nil
 }
 
 // unchanged reports a folder entry that still is the captured file: same type,
@@ -395,7 +425,7 @@ func (b *Base) liveDir(p string) ([]os.FileInfo, error) {
 			}
 			return nil, err
 		}
-		out = append(out, hostfile.Linked(filepath.Join(dir, e.Name()), info))
+		out = append(out, hostfile.Linked(info, dir, e.Name()))
 	}
 	return out, nil
 }

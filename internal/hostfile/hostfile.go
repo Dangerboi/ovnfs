@@ -22,5 +22,5 @@ func Lstat(name string) (os.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Linked(name, info), nil
+	return Linked(info, name), nil
 }

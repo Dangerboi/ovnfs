@@ -233,13 +233,13 @@ func setJunction(dir, target string) error {
 
 // Linked describes a junction, which Go reports as an irregular file since Go
 // 1.23, as the directory symlink it acts as; [os.Readlink] reads its target.
-// info is name's [os.Lstat] or [os.DirEntry.Info].
-func Linked(name string, info os.FileInfo) os.FileInfo {
+// info is the path's [os.Lstat] or [os.DirEntry.Info]; path segments are joined only for reparse points.
+func Linked(info os.FileInfo, parts ...string) os.FileInfo {
 	if info.Mode()&os.ModeIrregular == 0 {
 		return info
 	}
 	// Only symlinks and junctions have a target; other reparse points stay irregular.
-	if _, err := os.Readlink(name); err != nil {
+	if _, err := os.Readlink(filepath.Join(parts...)); err != nil {
 		return info
 	}
 	return junction{info}

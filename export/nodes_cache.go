@@ -26,7 +26,7 @@ func (t *nodeTable) prepareRename(from, to string) (func(), error) {
 	}
 	t.flush()
 	t.mu.Unlock()
-	finish := func() { t.mu.Lock(); extra(); t.mu.Unlock(); release() }
+	finish := func() { t.mu.Lock(); extra.release(); t.mu.Unlock(); release() }
 	if err != nil {
 		finish()
 		return nil, err
@@ -72,7 +72,7 @@ func (t *nodeTable) guard(all bool, paths ...string) (func(), error) {
 	}
 	releasePaths, err := t.keepPaths(recoverOwners, paths...)
 	if err != nil {
-		releasePaths()
+		releasePaths.release()
 		t.mu.Unlock()
 		return nil, err
 	}
@@ -81,7 +81,7 @@ func (t *nodeTable) guard(all bool, paths ...string) (func(), error) {
 	release := func() {
 		t.mu.Lock()
 		defer t.mu.Unlock()
-		releasePaths()
+		releasePaths.release()
 		t.trimCache()
 	}
 	if err != nil {

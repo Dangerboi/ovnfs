@@ -21,5 +21,5 @@ func CreateTemp(dir, pattern string) (*os.File, error) { return os.CreateTemp(di
 // Symlink is [os.Symlink]; every Unix account may create symlinks.
 func Symlink(target, link string) error { return os.Symlink(target, link) }
 
-// Linked returns info: Unix has no junctions.
-func Linked(_ string, info os.FileInfo) os.FileInfo { return info }
+// Linked returns info without joining its path segments: Unix has no junctions.
+func Linked(info os.FileInfo, _ ...string) os.FileInfo { return info }

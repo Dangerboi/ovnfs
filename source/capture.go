@@ -288,7 +288,7 @@ func (w *walker) dir(ctx context.Context, rel string) (bool, error) {
 			continue
 		}
 		p := path.Join(rel, e.Name())
-		info = hostfile.Linked(w.abs(p), info)
+		info = hostfile.Linked(info, w.o.Root, p)
 		d := decision{info: info, key: keyOf(info), class: rules.Source}
 		if rule, ok := w.o.Rules.Match(p, w.domains.Facts(walkView{w}, p, info)); ok {
 			d.class = rule.Class
@@ -311,7 +311,7 @@ func (w *walker) dir(ctx context.Context, rel string) (bool, error) {
 			// stays as a local copy-on-write root.
 			if (rel != "" || !w.domains.RootIsRepo()) && w.domains.Module(rel) == "" {
 				if info, err := e.Info(); err == nil {
-					info = hostfile.Linked(w.abs(p), info)
+					info = hostfile.Linked(info, w.o.Root, p)
 					w.identity.stat(p, rules.Local, info, keyOf(info))
 				} else {
 					w.unproven = true

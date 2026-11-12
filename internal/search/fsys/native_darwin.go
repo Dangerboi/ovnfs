@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"time"
 	"unsafe"
@@ -274,6 +275,16 @@ func (s *session) listBulk(h handle, detail Detail, count uint32) error {
 		if n <= 0 {
 			return nil
 		}
+		if n > len(buf)/bulkMinLen {
+			return unix.EIO
+		}
+		if detail == metadataDetail {
+			// The kernel has already counted this batch. Allocate only that
+			// many records instead of rounding every small directory up to
+			// infoSlabSize; returned entries keep the slab alive.
+			slab = make([]nativeInfo, 0, n)
+			s.entries = slices.Grow(s.entries, n)
+		}
 		off := 0
 		for range n {
 			if off+bulkMinLen > len(buf) {
@@ -530,10 +541,8 @@ func fstatat(dir handle, cname []byte, st *syscall.Stat_t, flags uintptr) error 
 // network and FUSE filesystems) also falls back to it, which reports all
 // directory errors.
 func (s *session) readDir(path string) ([]os.DirEntry, error) {
-	if unix.Faccessat(unix.AT_FDCWD, path, unix.X_OK, unix.AT_EACCESS) == nil {
-		if entries, err := s.readDirNative(path); err == nil {
-			return entries, nil
-		}
+	if entries, err := s.readDirNative(path); err == nil {
+		return entries, nil
 	}
 	s.entries = nil
 	return os.ReadDir(path)
@@ -547,6 +556,11 @@ func (s *session) readDirNative(path string) ([]os.DirEntry, error) {
 		return nil, err
 	}
 	defer closeHandle(h)
+	// Check the opened directory, not its absolute path again: this avoids
+	// a second root-to-leaf lookup and checks the identity we actually list.
+	if err := unix.Faccessat(h, ".", unix.X_OK, unix.AT_EACCESS); err != nil {
+		return nil, err
+	}
 	s.entries = nil
 	if err := s.list(h, metadataDetail, 0); err != nil {
 		s.entries = nil

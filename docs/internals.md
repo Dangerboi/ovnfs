@@ -204,6 +204,8 @@ checks run only for a tracked file the cache does not know. Attribute fallback
 reuses the capture's decoded index, including stage-zero `.gitattributes`
 entries excluded from its checked-out files. Narrow packed-reference lookups
 retain only matching refs while still validating the entire file.
+Attribute matching slices directory prefixes from the input path and folds
+case once, rather than rebuilding each ancestor's path.
 
 The walk classifies a directory's entries, then lists the source directories
 among them on four readers on macOS and Windows, eight on Linux. Directories
@@ -229,6 +231,12 @@ search. Search keeps compact names, types and optional size/mtime records;
 `fsys.ReadDir` supplies complete metadata and per-entry errors without adding
 full stat records to compact listings.
 
+Source listings merge sorted captured names with native metadata, retaining
+captured metadata for changed or missing host entries without statting every
+child again. A bottom-only overlay lets the bottom validate the directory
+once, including rejecting final symlinks. Junction metadata constructs host
+paths only for Windows reparse entries.
+
 Both modes use the same native enumeration loops and reusable buffers:
 Darwin's EOF-aware `getdirentries64` and `getattrlistbulk`, Linux's
 `getdents64` and descriptor-relative metadata, and Windows'
@@ -238,7 +246,10 @@ uses minimal `statx` masks for search, and falls back to `fstatat` when
 `statx` is unavailable. Freshness checks do not use `AT_STATX_DONT_SYNC`.
 
 Darwin bulk metadata is checked against native stat fields; entries it cannot
-describe exactly use descriptor-relative stat. Windows reparse entries use
+describe exactly use descriptor-relative stat. The search-permission check is
+relative to the opened directory, and metadata slabs follow each bulk batch's
+entry count rather than allocating a minimum slab for every small directory.
+Windows reparse entries use
 `Lstat`, and capture retains its inode pass and fresh directory timestamps.
 An entry's metadata error remains attached to that entry, so capture can
 report it without discarding the rest of the directory.
@@ -355,6 +366,11 @@ would repeatedly overflow 64 MiB. It still bounds reconstructible state far
 below the several GiB an unbounded walk can retain; smaller machines can lower
 it with the same knob. It does not bound total daemon RSS.
 
+Resident name lookups walk their parent path once without paging or retaining
+unneeded operation state. Operations that may release the node mutex reuse
+pooled pin sets; release clears node references, and oversized sets are not
+retained by the pool.
+
 The budget estimates map, node and name bytes (about 320 per resident logged
 node, 64 per cold logged child of a resident directory), rather than measuring
 the Go heap. The current directory stays cached even when it exceeds the budget,
@@ -392,8 +408,13 @@ never reuses their hashes or changes the identity log format.
 
 The NFS server separately keeps at most 1024 listing snapshots for READDIR
 cookies; eviction from the identity cache does not change those cookies or
-verifiers. Each connection reuses a bounded pool of request workers, started
-on demand; disconnect drains accepted calls before releasing the connection.
+verifiers. READDIR checks reply budgets before allocating an identity or encoding
+an entry that cannot fit. Continuations still refresh metadata first, so a
+removed entry cannot block a later name that fits. Each connection reuses a
+bounded pool of request workers, started
+on demand; each worker reuses its call and reply-encoder storage, clearing
+buffer references after replying. Disconnect drains accepted calls before
+releasing the connection.
 Its kept writable files expire when idle. NFSv4 state follows client
 leases and explicit close/unlock/delegation return. The overlay's `pathIDs` and
 `aliases` describe current upper files, are removed with those files, and do

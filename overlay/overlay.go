@@ -335,19 +335,19 @@ func (f *FS) ReadDir(name string) ([]os.FileInfo, error) {
 
 // readDir applies ancestor barriers, whiteouts, opaque directories and shadows.
 func (f *FS) readDir(p string) ([]os.FileInfo, error) {
+	if !reserved(p) && f.bottomOnly(p) {
+		items, err := f.bottom.ReadDir(p)
+		if err != nil {
+			return nil, err
+		}
+		return f.sortedVisible(items), nil
+	}
 	_, info, err := f.lookup(p)
 	if err != nil {
 		return nil, err
 	}
 	if !info.IsDir() {
 		return nil, &fs.PathError{Op: "readdir", Path: p, Err: syscall.ENOTDIR}
-	}
-	if f.bottomOnly(p) {
-		items, err := f.bottom.ReadDir(p)
-		if err != nil && !missing(err) {
-			return nil, err
-		}
-		return f.sortedVisible(items), nil
 	}
 	seen := make(map[string]bool)
 	out := make([]os.FileInfo, 0)

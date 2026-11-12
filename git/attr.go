@@ -536,7 +536,8 @@ func (a *Attributes) dirRules(dir string) ([]attrRule, error) {
 // AttrUnset or the attribute's value, as `git check-attr` reports them.
 func (a *Attributes) Check(p string) ([]string, error) {
 	dir := strings.HasSuffix(p, "/")
-	parts := strings.Split(strings.TrimSuffix(p, "/"), "/")
+	clean := strings.TrimSuffix(p, "/")
+	parts := strings.Split(clean, "/")
 	for _, part := range parts {
 		if part == "" || part == "." || part == ".." {
 			return nil, fmt.Errorf("attribute path %q is not a clean relative path", p)
@@ -544,17 +545,21 @@ func (a *Attributes) Check(p string) ([]string, error) {
 	}
 	match := parts
 	if a.syntax.fold {
-		match = make([]string, len(parts))
-		for n, part := range parts {
-			match[n] = asciiLower(part)
+		if folded := asciiLower(clean); folded != clean {
+			match = strings.Split(folded, "/")
 		}
 	}
 	fill := attrFill{decided: make(map[string]attrState), macros: a.macros, wanted: a.wanted, remaining: len(a.wanted)}
 	// Sources in falling precedence: info/attributes, then each .gitattributes
 	// from the path's own directory up to the top, then global and system.
 	fill.apply(a.info, match, dir)
+	end := len(clean)
 	for depth := len(parts) - 1; depth >= 0 && fill.remaining > 0; depth-- {
-		rules, err := a.dirRules(strings.Join(parts[:depth], "/"))
+		end -= len(parts[depth])
+		if end > 0 {
+			end--
+		}
+		rules, err := a.dirRules(clean[:end])
 		if err != nil {
 			return nil, err
 		}

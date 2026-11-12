@@ -81,24 +81,32 @@ func (s *Server) list3(d *decoder, res *encoder, plus bool) status {
 	}
 	for i := start; fits && i < len(l.entries); i++ {
 		info := l.entries[i]
-		child := path.Join(p, info.Name())
+		var child string
+		if plus && cookie != 0 {
+			// Refresh before checking space: a vanished entry must not
+			// prevent a later, shorter name from fitting this page.
+			child = path.Join(p, info.Name())
+			fresh, err := s.FS.Lstat(child)
+			if err != nil {
+				continue
+			}
+			info = fresh
+		}
+		var a attrs
+		if !r.room(info.Name(), &a) {
+			fits = false
+			break
+		}
+		if child == "" {
+			child = path.Join(p, info.Name())
+		}
 		c := l.first + uint64(i)
 		childID := s.FS.FileID(child)
 		if childID == 0 {
 			return stIO
 		}
 		if plus {
-			// A continuation's listing may be older than the client's
-			// cached attributes, which it would replace: describe the
-			// entry as it is now, and leave it out once it is gone.
-			if cookie != 0 {
-				fresh, err := s.FS.Lstat(child)
-				if err != nil {
-					continue
-				}
-				info = fresh
-			}
-			a := attrsOf(childID, info)
+			a = attrsOf(childID, info)
 			fits = r.add(info.Name(), c, a.fileid, &a)
 		} else {
 			fits = r.add(info.Name(), c, childID, nil)
@@ -131,7 +139,9 @@ type dirReply3 struct {
 // add appends an entry (for READDIRPLUS, with attributes a, if known, and
 // handle id); false, with nothing appended, when it does not fit.
 func (r *dirReply3) add(name string, cookie, id uint64, a *attrs) bool {
-	at := r.res.len()
+	if !r.room(name, a) {
+		return false
+	}
 	r.res.bool(true)
 	r.res.u64(id)
 	r.res.str(name)
@@ -147,12 +157,22 @@ func (r *dirReply3) add(name string, cookie, id uint64, a *attrs) bool {
 		}
 	}
 	entry := uint32(20 + len(name) + pad(len(name)))
-	// 8 bytes close the result: the list's end and eof.
-	if uint64(r.res.len()-r.base+8) > uint64(r.maxcount) || uint64(r.dirBytes)+uint64(entry) > uint64(r.dircount) {
-		r.res.truncate(at)
-		return false
-	}
 	r.dirBytes += entry
 	r.n++
 	return true
+}
+
+// room checks encoded sizes before identity lookup or reply buffer growth.
+func (r *dirReply3) room(name string, a *attrs) bool {
+	entry := uint64(20 + len(name) + pad(len(name)))
+	extra := uint64(0)
+	if r.plus {
+		extra = 8 // absent attributes and handle
+		if a != nil {
+			extra += 84 + 4 + fhSize // fattr3 and opaque handle
+		}
+	}
+	// Include this entry's list discriminator, the terminator and eof.
+	return uint64(r.res.len()-r.base)+4+entry+extra+8 <= uint64(r.maxcount) &&
+		uint64(r.dirBytes)+entry <= uint64(r.dircount)
 }

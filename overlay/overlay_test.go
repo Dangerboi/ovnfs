@@ -26,6 +26,13 @@ func (b dirBottom) Lstat(p string) (os.FileInfo, error) { return os.Lstat(filepa
 
 // ReadDir lists host entries without interpreting overlay markers.
 func (b dirBottom) ReadDir(p string) ([]os.FileInfo, error) {
+	info, err := b.Lstat(p)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, &fs.PathError{Op: "readdir", Path: p, Err: syscall.ENOTDIR}
+	}
 	items, err := os.ReadDir(filepath.Join(b.dir, p))
 	if err != nil {
 		return nil, err

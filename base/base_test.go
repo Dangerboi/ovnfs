@@ -287,6 +287,44 @@ func TestCapturedNamesOutliveTheFolder(t *testing.T) {
 	}
 }
 
+// TestReadDirPreservesCapturedMetadata exercises bulk metadata after host mutations.
+func TestReadDirPreservesCapturedMetadata(t *testing.T) {
+	repo, dir := repository(t)
+	writeTestFile(t, filepath.Join(dir, "cache", "old"), "old")
+	b, _ := createTestBase(t, repo, nil)
+	check := func(p string, names []string) {
+		t.Helper()
+		entries, err := b.Bottom().ReadDir(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, entry := range entries {
+			got = append(got, entry.Name())
+			info, err := b.Bottom().Lstat(filepath.ToSlash(filepath.Join(p, entry.Name())))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if entry.Mode() != info.Mode() || entry.Size() != info.Size() || !entry.ModTime().Equal(info.ModTime()) {
+				t.Errorf("%s/%s: listing metadata differs from stat: %v, %v", p, entry.Name(), entry, info)
+			}
+		}
+		if !reflect.DeepEqual(got, names) {
+			t.Fatalf("%s: got %v, want %v", p, got, names)
+		}
+	}
+	check("", []string{".gitignore", "cache", "source.txt", "src"})
+	writeTestFile(t, filepath.Join(dir, "source.txt"), "different source bytes")
+	writeTestFile(t, filepath.Join(dir, "new-source"), "not captured")
+	writeTestFile(t, filepath.Join(dir, "cache", "new"), "live")
+	if err := os.RemoveAll(filepath.Join(dir, "src")); err != nil {
+		t.Fatal(err)
+	}
+	check("", []string{".gitignore", "cache", "source.txt", "src"})
+	check("src", []string{"nested.txt"})
+	check("cache", []string{"new", "old"})
+}
+
 // TestCaptureKeepsOriginalIndex verifies staged state, dirty content and carried files.
 func TestCaptureKeepsOriginalIndex(t *testing.T) {
 	repo, dir := repository(t)

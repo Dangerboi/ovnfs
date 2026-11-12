@@ -2,8 +2,10 @@
 package dirbottom
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/stencil-hq/ovnfs/internal/clone"
 	"github.com/stencil-hq/ovnfs/internal/hostfile"
@@ -23,6 +25,13 @@ func (b bottom) Lstat(p string) (os.FileInfo, error) {
 
 // ReadDir returns children in name order, retaining symlink metadata.
 func (b bottom) ReadDir(p string) ([]os.FileInfo, error) {
+	info, err := b.Lstat(p)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, &fs.PathError{Op: "readdir", Path: p, Err: syscall.ENOTDIR}
+	}
 	entries, err := os.ReadDir(filepath.Join(b.dir, filepath.FromSlash(p)))
 	if err != nil {
 		return nil, err

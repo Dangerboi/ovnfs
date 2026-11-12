@@ -108,7 +108,7 @@ func (w *walk) tree(src, dst string, info fs.FileInfo) error {
 				return err
 			}
 			from := filepath.Join(src, e.Name())
-			if err := w.tree(from, filepath.Join(dst, e.Name()), hostfile.Linked(from, child)); err != nil {
+			if err := w.tree(from, filepath.Join(dst, e.Name()), hostfile.Linked(child, from)); err != nil {
 				return err
 			}
 		}

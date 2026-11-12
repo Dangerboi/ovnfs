@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -408,18 +409,18 @@ func (t *nodeTable) loadCold(d *node) bool {
 // recoverPaths pins directory caches until the caller finishes its in-memory
 // operation. It restarts from the root after each read, including ancestor
 // moves, rather than allowing a stale pointer to publish a path identity.
-func (t *nodeTable) recoverPaths(paths ...string) (func(), error) {
+func (t *nodeTable) recoverPaths(paths ...string) (*pathPins, error) {
 	if t.coldBytes == 0 && t.index == nil {
-		return func() {}, nil
+		return nil, nil
 	}
 	return t.keepPaths(recoverOwners, paths...)
 }
 
 // pagePaths pages in and pins the logged nodes along paths, without
 // recovering cold owners, until the caller finishes.
-func (t *nodeTable) pagePaths(paths ...string) (func(), error) {
+func (t *nodeTable) pagePaths(paths ...string) (*pathPins, error) {
 	if t.index == nil {
-		return func() {}, nil
+		return nil, nil
 	}
 	return t.keepPaths(pageLogged, paths...)
 }
@@ -432,30 +433,49 @@ const (
 	recoverOwners                 // also each directory's cold owners
 )
 
-func (t *nodeTable) keepPaths(how recovery, paths ...string) (func(), error) {
-	var kept []*dirState
-	release := func() {
-		for _, s := range kept {
-			s.reading--
-		}
+// pathPins retains directory state while an operation may release the node mutex.
+type pathPins struct {
+	states []*dirState
+}
+
+var pathPinPool = sync.Pool{New: func() any {
+	return &pathPins{states: make([]*dirState, 0, 16)}
+}}
+
+// release drops the pins under the node mutex and clears references before reuse.
+func (p *pathPins) release() {
+	if p == nil {
+		return
 	}
+	for _, s := range p.states {
+		s.reading--
+	}
+	clear(p.states)
+	if cap(p.states) <= 256 {
+		p.states = p.states[:0]
+		pathPinPool.Put(p)
+	}
+}
+
+func (t *nodeTable) keepPaths(how recovery, paths ...string) (*pathPins, error) {
+	pins := pathPinPool.Get().(*pathPins)
 	for failures := 0; failures < 16; {
 		restart := false
 		for _, p := range paths {
 			d := t.root
 			for {
 				if s := d.state(); s != nil {
-					if !slices.Contains(kept, s) {
+					if !slices.Contains(pins.states, s) {
 						s.reading++
-						kept = append(kept, s)
+						pins.states = append(pins.states, s)
 					}
 					if how == recoverOwners && s.cold && !s.coldLoaded {
 						if t.spillErr != nil {
-							return release, syscall.ENOSPC
+							return pins, syscall.ENOSPC
 						}
 						if !t.loadCold(d) {
 							if t.cacheErr != nil {
-								return release, t.cacheErr
+								return pins, t.cacheErr
 							}
 							failures++
 						}
@@ -474,7 +494,7 @@ func (t *nodeTable) keepPaths(how recovery, paths ...string) (func(), error) {
 							}
 						}
 						if t.cacheErr != nil {
-							return release, t.cacheErr
+							return pins, t.cacheErr
 						}
 						failures++
 					}
@@ -491,10 +511,10 @@ func (t *nodeTable) keepPaths(how recovery, paths ...string) (func(), error) {
 			}
 		}
 		if !restart {
-			return release, nil
+			return pins, nil
 		}
 	}
-	return release, syscall.EAGAIN
+	return pins, syscall.EAGAIN
 }
 
 // readOwners keeps the authoritative index and operation state alive, without
@@ -637,28 +657,40 @@ func (t *nodeTable) readOwner(d *node, hash uint32) (string, bool) {
 	}
 }
 
+// residentID resolves an issued name with one resident path walk and no I/O.
+func (t *nodeTable) residentID(p string) (uint64, bool) {
+	if p == "" {
+		return t.root.id, true
+	}
+	dir, name := split(p)
+	d := t.find(dir)
+	if d == nil {
+		return 0, false
+	}
+	if n := d.kids[name]; n != nil {
+		t.touch(d)
+		return n.id, true
+	}
+	if d.leaf(name) {
+		t.touch(d)
+		return derivedID(d.key, nameHash(name)), true
+	}
+	if st, ok := d.stub(name); ok {
+		return st.id, true
+	}
+	return 0, false
+}
+
 // issuedID finds an existing name without recovering unrelated cold owners.
 // Healthy ID requests admit partial results and batch dense rewalks; transient
 // callers leave admission and mutation preparation to their own operations.
 func (t *nodeTable) issuedID(p string, admit bool) (uint64, bool) {
 	dir, name := split(p)
 	for {
-		if n := t.find(p); n != nil {
-			if n.parent != nil {
-				t.touch(n.parent)
-			}
-			return n.id, true
-		}
-		if id, ok := t.leafID(p); ok {
-			t.touch(t.find(dir))
+		if id, ok := t.residentID(p); ok {
 			return id, true
 		}
 		d := t.find(dir)
-		if d != nil && p != "" {
-			if st, ok := d.stub(name); ok {
-				return st.id, true
-			}
-		}
 		if d == nil || d.dir == nil || !d.dir.cold || d.dir.coldLoaded {
 			return 0, false
 		}

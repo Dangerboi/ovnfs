@@ -194,8 +194,11 @@ func (t *nodeTable) id(p string) (id uint64) {
 	if t.cacheErr != nil {
 		return 0
 	}
+	if id, ok := t.residentID(p); ok {
+		return id
+	}
 	paged, err := t.pagePaths(p)
-	defer paged()
+	defer paged.release()
 	if err != nil {
 		return 0
 	}
@@ -222,7 +225,7 @@ func (t *nodeTable) id(p string) (id uint64) {
 		return id
 	}
 	release, err := t.recoverPaths(p)
-	defer release()
+	defer release.release()
 	if err != nil {
 		return 0
 	}
@@ -245,7 +248,7 @@ func (t *nodeTable) lookup(p string) (uint64, bool) {
 	defer t.mu.Unlock()
 	defer t.trimCache()
 	paged, err := t.pagePaths(p)
-	defer paged()
+	defer paged.release()
 	if err != nil {
 		return 0, false
 	}
@@ -277,7 +280,7 @@ func (t *nodeTable) subtree(p string) []uint64 {
 	defer t.mu.Unlock()
 	defer t.trimCache()
 	paged, err := t.pagePaths(p)
-	defer paged()
+	defer paged.release()
 	if err != nil {
 		return nil
 	}
@@ -434,7 +437,7 @@ func (t *nodeTable) rename(from, to string) {
 	defer t.trimCache()
 	defer t.flush()
 	release, err := t.recoverPaths(from, to)
-	defer release()
+	defer release.release()
 	if err != nil {
 		return
 	}
@@ -488,7 +491,7 @@ func (t *nodeTable) remove(p string) {
 	defer t.flush()
 	dir, name := split(p)
 	paged, err := t.pagePaths(dir)
-	defer paged()
+	defer paged.release()
 	if err != nil {
 		return
 	}
@@ -536,7 +539,7 @@ func (t *nodeTable) created(p string) {
 	defer t.trimCache()
 	defer t.flush()
 	release, err := t.recoverPaths(p)
-	defer release()
+	defer release.release()
 	if err != nil {
 		return
 	}
@@ -615,7 +618,7 @@ func (t *nodeTable) startListing(dir string) listing {
 	defer t.mu.Unlock()
 	defer t.trimCache()
 	release, err := t.recoverPaths(dir)
-	defer release()
+	defer release.release()
 	if err != nil {
 		return listing{}
 	}
@@ -670,7 +673,7 @@ func (t *nodeTable) unlist(p string, deep bool) {
 // listed, or derive false, falls back to a counter id instead.
 func (t *nodeTable) ensure(p string, listed *node, derive bool) (id uint64, unlisted *node) {
 	release, err := t.recoverPaths(p)
-	defer release()
+	defer release.release()
 	if err != nil {
 		return 0, nil
 	}

@@ -105,12 +105,16 @@ func (c *conn) serve() {
 	workers := 0
 	work := func(first *[]byte) {
 		defer wg.Done()
+		var cl call
+		var reply encoder
 		for req := first; req != nil; req = <-jobs {
-			c.answer(*req)
+			c.answer(*req, &cl, &reply)
 			putBuf(req)
 		}
 	}
 	r := bufio.NewReaderSize(c.nc, 64<<10)
+	var cl call
+	var reply encoder
 	for {
 		req := bufs.Get().(*[]byte)
 		rec, err := readRecord(r, *req)
@@ -123,7 +127,7 @@ func (c *conn) serve() {
 		}
 		*req = rec
 		if c.srv.Concurrency <= 1 {
-			c.answer(rec)
+			c.answer(rec, &cl, &reply)
 			putBuf(req)
 			continue
 		}
@@ -173,11 +177,12 @@ func readRecord(r *bufio.Reader, buf []byte) ([]byte, error) {
 
 // answer decodes one call, dispatches it and sends the reply. A record that
 // is not a well-formed call closes the connection: its stream cannot be
-// trusted to stay in step.
-func (c *conn) answer(rec []byte) {
+// trusted to stay in step. Each worker owns its call and encoder storage;
+// dispatch never retains them after returning.
+func (c *conn) answer(rec []byte, cl *call, e *encoder) {
 	d := decoder{buf: rec}
 	xid, mtype, rpcvers := d.u32(), d.u32(), d.u32()
-	cl := call{xid: xid, prog: d.u32(), vers: d.u32(), proc: d.u32(), conn: c}
+	*cl = call{xid: xid, prog: d.u32(), vers: d.u32(), proc: d.u32(), conn: c}
 	flavor := d.u32()
 	d.opaque(maxAuthBytes)
 	d.u32()
@@ -190,7 +195,7 @@ func (c *conn) answer(rec []byte) {
 
 	rb := bufs.Get().(*[]byte)
 	defer putBuf(rb)
-	e := encoder{buf: *rb}
+	*e = encoder{buf: *rb}
 	e.u32(0) // record mark, set below
 	e.u32(xid)
 	e.u32(msgReply)
@@ -211,7 +216,7 @@ func (c *conn) answer(rec []byte) {
 		at := e.len()
 		e.u32(0) // accept_stat, set below
 		cl.args = d
-		stat := c.srv.dispatch(&cl, &e)
+		stat := c.srv.dispatch(cl, e)
 		if stat != rpcSuccess && stat != rpcProgMismatch {
 			e.truncate(at + 4)
 		}
@@ -220,6 +225,8 @@ func (c *conn) answer(rec []byte) {
 	e.put32(0, lastFragment|uint32(e.len()-4))
 	*rb = e.buf
 	c.send(e.buf)
+	cl.args = decoder{}
+	e.buf = nil
 }
 
 // send writes one reply record; a failed write closes the connection.
