@@ -32,6 +32,9 @@ import (
 // exactly as a node would, and becomes a node only when an operation needs
 // one: listing it, moving it, retiring it or giving it a child.
 //
+// Logged nodes page out to the index of the identity log (nodes_logged.go)
+// under the same budget, and are paged in when an operation reaches them.
+//
 // Every id stays below 1<<53: JavaScript runtimes report inode numbers as
 // doubles, so larger ids would lose precision and distinct files could
 // compare equal. A directory whose key does not fit 30 bits gives its new
@@ -80,9 +83,16 @@ type nodeTable struct {
 	cacheErr     error
 	fault        atomic.Pointer[nodeCacheFault]
 	root         *node
-	byID         map[uint64]*node
-	byKey        map[uint64]*node // logged nodes
+	byID         map[uint64]*node // resident nodes
+	byKey        map[uint64]*node // resident logged nodes
 	next         uint64           // next counter id or key
+	index        *nodeIndex       // where logged nodes page out; nil keeps them resident
+	nodesBytes   int64            // size of the logged node index
+	runtimeBytes int64            // size of its slots for keys allocated since open
+	paging       map[uint64]chan struct{}
+	enumerations []*enumeration
+	deadKeys     []uint64 // retired cold keys whose index files remain
+	deadFiles    []string // owner index files of keys retired before this open
 	list         func(dir string) ([]os.FileInfo, error)
 	pending      []byte // records of the current operation, written by flush
 	log          *os.File
@@ -136,6 +146,15 @@ type dirState struct {
 	// leaves maps the name hash of each leaf to its name, shared with the
 	// listing it was derived from where possible.
 	leaves map[uint32]string
+	// stubs are the cold logged children of a resident logged directory.
+	stubs map[string]stub
+	// held maps each derived id hash of this key that a logged node holds,
+	// resident or cold, wherever it lives, to that node's key.
+	held       map[uint32]uint64
+	stale      bool      // the logged record differs from the index
+	loaded     nodeOwner // the owner index location the index holds
+	recordSize int64     // size of the record file of its own, if any
+	logged     int64     // estimated bytes that leave memory only with the node
 }
 
 // derivation is how ensure may identify a new child.
@@ -173,6 +192,11 @@ func (t *nodeTable) id(p string) (id uint64) {
 	}()
 	defer t.flush()
 	if t.cacheErr != nil {
+		return 0
+	}
+	paged, err := t.pagePaths(p)
+	defer paged()
+	if err != nil {
 		return 0
 	}
 	// Stop admitting new identities while a failed spill prevents reclamation.
@@ -220,6 +244,11 @@ func (t *nodeTable) lookup(p string) (uint64, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	defer t.trimCache()
+	paged, err := t.pagePaths(p)
+	defer paged()
+	if err != nil {
+		return 0, false
+	}
 	if n := t.find(p); n != nil {
 		return n.id, true
 	}
@@ -247,6 +276,11 @@ func (t *nodeTable) subtree(p string) []uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	defer t.trimCache()
+	paged, err := t.pagePaths(p)
+	defer paged()
+	if err != nil {
+		return nil
+	}
 	for {
 		n := t.find(p)
 		if n == nil {
@@ -265,7 +299,7 @@ func (t *nodeTable) subtree(p string) []uint64 {
 			location     nodeLocation
 		}
 		var dirs []snapshot
-		var out []uint64
+		var out, cold []uint64
 		var walk func(*node)
 		walk = func(n *node) {
 			out = append(out, n.id)
@@ -278,12 +312,19 @@ func (t *nodeTable) subtree(p string) []uint64 {
 				for h := range s.leaves {
 					out = append(out, derivedID(n.key, h))
 				}
+				for _, st := range s.stubs {
+					out, cold = append(out, st.id), append(cold, st.key)
+				}
 			}
 		}
 		walk(n)
 		valid := true
+		if len(cold) > 0 {
+			ids, ok := t.coldIDs(cold)
+			out, valid = append(out, ids...), ok
+		}
 		for _, old := range dirs {
-			if !old.s.cold || old.s.coldLoaded {
+			if !valid || !old.s.cold || old.s.coldLoaded {
 				continue
 			}
 			names, ok := t.readOwners(old.n)
@@ -335,6 +376,9 @@ func (t *nodeTable) path(id uint64) (p string, ok bool) {
 		if n.key == 0 {
 			t.touch(n.parent)
 		}
+		return n.fullPath(), true
+	}
+	if n := t.pageID(id); n != nil {
 		return n.fullPath(), true
 	}
 	d, name := t.resolve(id)
@@ -406,6 +450,9 @@ func (t *nodeTable) rename(from, to string) {
 	if d == nil {
 		return
 	}
+	if _, ok := d.stub(name); ok {
+		return // keepPaths paged the destination in; nothing replaced it since
+	}
 	if dst := t.child(d, name); dst != src {
 		t.drop(dst)
 	}
@@ -413,6 +460,10 @@ func (t *nodeTable) rename(from, to string) {
 		src.moves++
 		if src.key == 0 && src.holds == 0 {
 			t.charge(src.parent, -int64(160+len(src.name)))
+		}
+		if src.key != 0 {
+			t.markStale(src.parent)
+			t.addLogged(src, int64(len(name)-len(src.name)))
 		}
 		delete(src.parent.kids, src.name)
 		src.name, src.parent = strings.Clone(name), d
@@ -422,6 +473,8 @@ func (t *nodeTable) rename(from, to string) {
 			t.pin(src)
 		} else {
 			t.recordMove(src)
+			t.markStale(src)
+			t.markStale(d)
 		}
 	}
 	t.appeared(d, name)
@@ -433,11 +486,24 @@ func (t *nodeTable) remove(p string) {
 	defer t.mu.Unlock()
 	defer t.trimCache()
 	defer t.flush()
+	dir, name := split(p)
+	paged, err := t.pagePaths(dir)
+	defer paged()
+	if err != nil {
+		return
+	}
 	// Logged directories can retire their whole key without reading any child
-	// index. A cold leaf needs only its exact transient owner, not admission.
+	// index, or paging in a cold one. A cold leaf needs only its exact
+	// transient owner, not admission.
 	if n := t.find(p); n != nil {
 		t.drop(n)
 		return
+	}
+	if d := t.find(dir); d != nil && p != "" {
+		if _, ok := d.stub(name); ok {
+			t.dropStub(d, name)
+			return
+		}
 	}
 	if n := t.node(p); n != nil {
 		t.drop(n)
@@ -451,7 +517,6 @@ func (t *nodeTable) remove(p string) {
 		t.drop(n)
 		return
 	}
-	dir, name := split(p)
 	d := t.find(dir)
 	if d == nil {
 		return
@@ -477,7 +542,7 @@ func (t *nodeTable) created(p string) {
 	}
 	dir, name := split(p)
 	if d := t.find(dir); d != nil && d.kids[name] == nil && !d.leaf(name) {
-		if t.child(d, name) == nil {
+		if _, cold := d.stub(name); !cold && t.child(d, name) == nil {
 			t.appeared(d, name)
 		}
 	}
@@ -625,6 +690,9 @@ func (t *nodeTable) ensure(p string, listed *node, derive bool) (id uint64, unli
 	if k := d.kids[name]; k != nil {
 		return k.id, nil
 	}
+	if st, ok := d.stub(name); ok {
+		return st.id, nil
+	}
 	if d.leaf(name) {
 		return derivedID(d.key, nameHash(name)), nil
 	}
@@ -674,7 +742,7 @@ func (t *nodeTable) derive(d *node, name string) (uint64, string, derivation) {
 		return id, "", needListing
 	}
 	for _, other := range names {
-		if other != name && d.kids[other] == nil {
+		if other != name && !d.named(other) {
 			// Resolution could not tell the two apart.
 			return 0, "", useCounter
 		}
@@ -697,7 +765,8 @@ func (t *nodeTable) takenExceptCold(d *node, h uint32) bool {
 		return false
 	}
 	_, leaf := s.leaves[h]
-	return leaf || s.isRetired(h)
+	_, held := s.held[h]
+	return leaf || held || s.isRetired(h)
 }
 
 // resolve finds the entry a derived id that no node holds names, as its
@@ -716,9 +785,19 @@ func (t *nodeTable) resolve(id uint64) (*node, string) {
 		}
 		d := t.byKey[key]
 		if d == nil {
-			return nil, ""
+			if t.pageKey(key) == nil {
+				return nil, ""
+			}
+			continue
 		}
 		if s := d.dir; s != nil {
+			if holder, ok := s.held[h]; ok {
+				// A logged node holds the id, wherever it moved.
+				if n := t.pageKey(holder); n != nil && n.id == id {
+					return n.parent, n.name
+				}
+				return nil, ""
+			}
 			if s.isRetired(h) {
 				return nil, ""
 			}
@@ -806,11 +885,11 @@ func (s *dirState) candidate(d *node, h uint32) (string, bool) {
 	case !ok:
 		return "", false
 	case v != ambiguous:
-		return v, d.kids[v] == nil
+		return v, !d.named(v)
 	}
 	match, n := "", 0
 	for _, name := range s.dups[h] {
-		if d.kids[name] == nil {
+		if !d.named(name) {
 			match, n = name, n+1
 		}
 	}
@@ -898,7 +977,7 @@ func (t *nodeTable) appeared(d *node, name string) {
 			}
 		}
 	}
-	if d.kids[name] != nil || d.leaf(name) || t.list == nil || d.key == 0 || d.key >= maxDerivingKey {
+	if _, cold := d.stub(name); cold || d.kids[name] != nil || d.leaf(name) || t.list == nil || d.key == 0 || d.key >= maxDerivingKey {
 		return
 	}
 	if t.taken(d, h) {
@@ -914,8 +993,8 @@ func (t *nodeTable) dirNode(p string) *node {
 		var name string
 		name, rest, _ = strings.Cut(rest, "/")
 		k := t.child(n, name)
-		if k == nil && t.cacheErr != nil {
-			return nil
+		if _, cold := n.stub(name); k == nil && (cold || t.cacheErr != nil) {
+			return nil // a cold logged directory is paged in first, never replaced
 		}
 		switch {
 		case k == nil:
@@ -935,6 +1014,7 @@ func (t *nodeTable) alloc(d *node, name string) *node {
 	t.link(d, k)
 	t.byKey[k.key] = k
 	t.recordNode(k)
+	t.loggedNew(k)
 	return k
 }
 
@@ -947,6 +1027,7 @@ func (t *nodeTable) pin(k *node) {
 	t.next++
 	t.byKey[k.key] = k
 	t.recordNode(k)
+	t.loggedNew(k)
 }
 
 // link attaches k under d and indexes its id.
@@ -959,6 +1040,12 @@ func (t *nodeTable) link(d, k *node) {
 	if k.key == 0 && k.holds == 0 {
 		t.charge(d, int64(160+len(k.name)))
 	}
+}
+
+// named reports whether a resident or cold logged child of n owns name.
+func (n *node) named(name string) bool {
+	_, cold := n.stub(name)
+	return cold || n.kids[name] != nil
 }
 
 // leaf reports whether name is one of n's leaves.
@@ -1057,7 +1144,8 @@ func (t *nodeTable) drop(n *node) {
 		return
 	}
 	if n.key != 0 {
-		t.recordRemove(n)
+		t.recordRemove(n.key)
+		t.markStale(n.parent)
 	}
 	if n.key == 0 && n.holds == 0 {
 		t.charge(n.parent, -int64(160+len(n.name)))
@@ -1066,8 +1154,16 @@ func (t *nodeTable) drop(n *node) {
 	var forget, retire func(*node)
 	forget = func(n *node) {
 		t.uncache(n)
-		if s := n.dir; s != nil && (s.cold || s.indexing != nil) && t.coldRoot != "" {
-			t.coldGarbage = append(t.coldGarbage, coldGarbage{t.coldPath(n), n})
+		if s := n.dir; s != nil {
+			if (s.cold || s.indexing != nil) && t.coldRoot != "" {
+				t.coldGarbage = append(t.coldGarbage, coldGarbage{path: t.coldPath(n), dir: n})
+			}
+			if (s.recordSize > 0 || s.indexing != nil) && t.index != nil {
+				t.coldGarbage = append(t.coldGarbage, coldGarbage{path: coldIndexPath(t.index.dir, n.key), dir: n, record: true})
+			}
+			for _, st := range s.stubs {
+				t.deadKeys = append(t.deadKeys, st.key)
+			}
 		}
 		delete(t.byID, n.id)
 		if n.key != 0 {
@@ -1078,17 +1174,14 @@ func (t *nodeTable) drop(n *node) {
 		}
 	}
 	retire = func(n *node) {
-		if n.id&derivedBit != 0 {
-			if d := t.byKey[n.id>>hashBits&(maxDerivingKey-1)]; d != nil {
-				s := d.state()
-				if h := uint32(n.id & (1<<hashBits - 1)); !s.isRetired(h) {
-					s.retire(h)
-					s.coldDirty = true
-				}
-			}
-		}
+		t.retireID(n.id)
 		for _, k := range n.kids {
 			retire(k)
+		}
+		if s := n.dir; s != nil {
+			for _, st := range s.stubs {
+				t.retireID(st.id)
+			}
 		}
 	}
 	forget(n)

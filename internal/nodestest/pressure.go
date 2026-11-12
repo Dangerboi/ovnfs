@@ -61,7 +61,7 @@ func New(t testing.TB, files map[string]string) (*export.Export, string) {
 }
 
 // Cold checks the exact derived owner in the disposable index, not just that
-// some directory spilled. Logged ids intentionally cannot be evicted.
+// some directory spilled.
 func Cold(t testing.TB, state string, id uint64, name string) {
 	t.Helper()
 	if id&(1<<52) == 0 {

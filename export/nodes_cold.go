@@ -295,7 +295,7 @@ func (t *nodeTable) ownersToWrite(d *node, names map[uint32]string, retired []ui
 		}
 	}
 	for h := range names {
-		if s.isRetired(h) || t.byID[derivedID(d.key, h)] != nil && t.byID[derivedID(d.key, h)].key != 0 {
+		if _, held := s.held[h]; held || s.isRetired(h) || t.byID[derivedID(d.key, h)] != nil && t.byID[derivedID(d.key, h)].key != 0 {
 			delete(names, h)
 			changed = true
 		}
@@ -409,13 +409,30 @@ func (t *nodeTable) loadCold(d *node) bool {
 // operation. It restarts from the root after each read, including ancestor
 // moves, rather than allowing a stale pointer to publish a path identity.
 func (t *nodeTable) recoverPaths(paths ...string) (func(), error) {
-	if t.coldBytes == 0 {
+	if t.coldBytes == 0 && t.index == nil {
 		return func() {}, nil
 	}
-	return t.keepPaths(paths...)
+	return t.keepPaths(recoverOwners, paths...)
 }
 
-func (t *nodeTable) keepPaths(paths ...string) (func(), error) {
+// pagePaths pages in and pins the logged nodes along paths, without
+// recovering cold owners, until the caller finishes.
+func (t *nodeTable) pagePaths(paths ...string) (func(), error) {
+	if t.index == nil {
+		return func() {}, nil
+	}
+	return t.keepPaths(pageLogged, paths...)
+}
+
+// recovery is what keepPaths makes resident along its paths.
+type recovery int
+
+const (
+	pageLogged    recovery = iota // the logged nodes
+	recoverOwners                 // also each directory's cold owners
+)
+
+func (t *nodeTable) keepPaths(how recovery, paths ...string) (func(), error) {
 	var kept []*dirState
 	release := func() {
 		for _, s := range kept {
@@ -432,7 +449,7 @@ func (t *nodeTable) keepPaths(paths ...string) (func(), error) {
 						s.reading++
 						kept = append(kept, s)
 					}
-					if s.cold && !s.coldLoaded {
+					if how == recoverOwners && s.cold && !s.coldLoaded {
 						if t.spillErr != nil {
 							return release, syscall.ENOSPC
 						}
@@ -448,7 +465,23 @@ func (t *nodeTable) keepPaths(paths ...string) (func(), error) {
 				}
 				name, rest, _ := strings.Cut(p, "/")
 				p = rest
-				d = d.kids[name]
+				k := d.kids[name]
+				if st, cold := d.stub(name); k == nil && cold {
+					if t.pageKey(st.key) == nil {
+						if t.cacheErr == nil && t.byID[d.id] == d {
+							if again, ok := d.stub(name); ok && again == st {
+								t.cacheFailure(errNodeIndex) // a live stub without a record
+							}
+						}
+						if t.cacheErr != nil {
+							return release, t.cacheErr
+						}
+						failures++
+					}
+					restart = true
+					break
+				}
+				d = k
 				if d == nil || name == "" {
 					break
 				}
@@ -621,6 +654,11 @@ func (t *nodeTable) issuedID(p string, admit bool) (uint64, bool) {
 			return id, true
 		}
 		d := t.find(dir)
+		if d != nil && p != "" {
+			if st, ok := d.stub(name); ok {
+				return st.id, true
+			}
+		}
 		if d == nil || d.dir == nil || !d.dir.cold || d.dir.coldLoaded {
 			return 0, false
 		}
@@ -657,11 +695,13 @@ func (t *nodeTable) issuedID(p string, admit bool) (uint64, bool) {
 	}
 }
 
-// Retired directory keys are never reused. Delete their indexes after any
-// in-flight replacement has finished, outside the node mutex.
+// Retired directory keys are never reused. Delete their indexes, and the
+// records of retired logged nodes, after any in-flight replacement has
+// finished, outside the node mutex.
 type coldGarbage struct {
-	path string
-	dir  *node
+	path   string
+	dir    *node
+	record bool // the logged record, not the owner index
 }
 
 func (t *nodeTable) cleanCold() {
@@ -680,6 +720,9 @@ func (t *nodeTable) cleanCold() {
 			t.mu.Lock()
 		}
 		size := s.coldBytes
+		if old.record {
+			size = s.recordSize
+		}
 		t.mu.Unlock()
 		err := os.Remove(old.path)
 		t.mu.Lock()
@@ -687,8 +730,14 @@ func (t *nodeTable) cleanCold() {
 			t.coldGarbage = append(t.coldGarbage, old)
 			return
 		}
+		if old.record {
+			t.nodesBytes -= size
+			s.recordSize = 0
+			continue
+		}
 		t.coldBytes -= size
 		s.coldBytes = 0
 		s.cold = false
 	}
+	t.cleanDead()
 }

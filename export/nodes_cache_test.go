@@ -8,7 +8,8 @@ import (
 	"time"
 )
 
-// forceCold fills another directory so the requested directory is evicted.
+// forceCold fills another directory so the requested directory is evicted,
+// its listing at least, or its whole node when it pages out to the index.
 func forceCold(t *testing.T, nt *nodeTable, ns *namespace, dir string) {
 	t.Helper()
 	ns.add("pressure/entry")
@@ -19,7 +20,7 @@ func forceCold(t *testing.T, nt *nodeTable, ns *namespace, dir string) {
 	})
 	nt.cacheLimit = 0
 	nt.id("pressure/entry")
-	if d := nt.find(dir); d == nil || d.dir == nil || d.dir.entries != nil || len(d.dir.leaves) != 0 {
+	if d := nt.find(dir); d != nil && (d.dir == nil || d.dir.entries != nil || len(d.dir.leaves) != 0) {
 		t.Fatalf("%s was not evicted", dir)
 	}
 }
@@ -388,10 +389,10 @@ func TestColdReadFailureDoesNotAllocate(t *testing.T) {
 	ns := newNamespace("co/file", "pressure/entry")
 	nt := openLogged(t, filepath.Join(t.TempDir(), "nodes.log"), ns)
 	old := nt.id("co/file")
+	key := nt.find("co").key
 	nt.cacheLimit = 0
 	nt.id("pressure/entry")
-	d := nt.find("co")
-	name := nt.coldPath(d)
+	name := coldIndexPath(nt.coldRoot, key)
 	before, next := logSize(t, nt.log.Name()), nt.next
 	if err := os.Rename(name, name+".saved"); err != nil {
 		t.Fatal(err)
@@ -497,7 +498,8 @@ func TestDegradedBelowBudgetDoesNotLogWalks(t *testing.T) {
 				t.Fatal(err)
 			}
 			nt.coldRoot = blocked
-			nt.cacheLimit = 210
+			// The listings exceed 210 bytes; the logged co and pressure stay.
+			nt.cacheLimit = 210 + loggedSize("co") + loggedSize("pressure") + 2*heldBytes
 			nt.id("pressure/entry")
 			if nt.spillErr == nil {
 				t.Fatal("spill did not fail")

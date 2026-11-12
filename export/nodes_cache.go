@@ -20,7 +20,7 @@ func (t *nodeTable) prepareRename(from, to string) (func(), error) {
 	dir, _ := split(to)
 	t.dirNode(dir)
 	t.node(to)
-	extra, err := t.keepPaths(from, to)
+	extra, err := t.keepPaths(recoverOwners, from, to)
 	if err == nil {
 		err = t.cacheErr
 	}
@@ -70,7 +70,7 @@ func (t *nodeTable) guard(all bool, paths ...string) (func(), error) {
 			}
 		}
 	}
-	releasePaths, err := t.keepPaths(paths...)
+	releasePaths, err := t.keepPaths(recoverOwners, paths...)
 	if err != nil {
 		releasePaths()
 		t.mu.Unlock()
@@ -125,8 +125,8 @@ func (e *Export) NodeCacheError() string {
 const DefaultNodeCache = 512 << 20
 
 // SetNodeCache sets the reconstructible identity budget. Zero keeps only the
-// current directory, so a READDIR can still identify its entries in linear time.
-// Logged nodes and retired hashes never count towards this budget.
+// current directory and its ancestors, so a READDIR can still identify its
+// entries in linear time. Resident logged nodes count towards this budget.
 func (e *Export) SetNodeCache(limit int64) {
 	t := e.fs.nodes
 	t.mu.Lock()
@@ -143,29 +143,40 @@ func (e *Export) NodeCache() api.Usage {
 	return api.Usage{Used: t.cacheUsed, Limit: t.cacheLimit}
 }
 
-// NodeIndexBytes reports the ownership index files, separately from RSS.
+// NodeIndexBytes reports the ownership and logged node index files,
+// separately from RSS.
 func (e *Export) NodeIndexBytes() int64 {
 	t := e.fs.nodes
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.coldBytes
+	return t.coldBytes + t.nodesBytes
 }
 
-// touch marks a cached directory most recently used, under the node mutex.
+// touch marks a cached directory and its ancestors most recently used, under
+// the node mutex. Ancestors stay more recent than their descendants, so the
+// least recently used entry never has resident children unless held.
 func (t *nodeTable) touch(d *node) {
-	s := d.state()
-	if s.recent != nil {
+	if d.parent != nil {
+		t.touch(d.parent)
+	}
+	if s := d.dir; s != nil && s.recent != nil {
 		t.cacheLRU.MoveToFront(s.recent)
 	}
 }
 
-// charge adjusts a directory's estimated cache bytes. Estimates include map
-// overhead and count shared names twice rather than undercounting.
+// charge adjusts a directory's estimated cache bytes and marks it used.
+// Estimates include map overhead and count shared names twice rather than
+// undercounting.
 func (t *nodeTable) charge(d *node, delta int64) {
-	if delta == 0 {
-		t.touch(d)
-		return
+	if delta != 0 {
+		t.account(d, delta)
 	}
+	t.touch(d)
+}
+
+// account adjusts a directory's estimated cache bytes without marking it
+// used: it enters the cache as least recently used.
+func (t *nodeTable) account(d *node, delta int64) {
 	s := d.state()
 	s.version++
 	s.cached += delta
@@ -176,10 +187,18 @@ func (t *nodeTable) charge(d *node, delta int64) {
 			s.recent = nil
 		}
 	} else if s.recent == nil {
-		s.recent = t.cacheLRU.PushFront(d)
-	} else {
-		t.cacheLRU.MoveToFront(s.recent)
+		s.recent = t.cacheLRU.PushBack(d)
 	}
+}
+
+// addLogged accounts bytes that leave memory only with logged node d, when
+// the table can page logged nodes out.
+func (t *nodeTable) addLogged(d *node, delta int64) {
+	if t.index == nil || delta == 0 {
+		return
+	}
+	d.state().logged += delta
+	t.account(d, delta)
 }
 
 // listBytes estimates the listing's maps, duplicate slices and cloned names.
@@ -202,11 +221,12 @@ func (s *dirState) dupBytes(h uint32) int64 {
 	return n
 }
 
-// uncache removes a deleted directory from the LRU without changing its identity.
+// uncache removes a deleted or evicted node from the LRU without changing its
+// identity.
 func (t *nodeTable) uncache(d *node) {
 	if s := d.dir; s != nil {
 		t.cacheUsed -= s.cached
-		s.cached = 0
+		s.cached, s.logged = 0, 0
 		if s.recent != nil {
 			t.cacheLRU.Remove(s.recent)
 			s.recent = nil
@@ -214,11 +234,23 @@ func (t *nodeTable) uncache(d *node) {
 	}
 }
 
-// trimCache drops whole cold directories. Keeping the current directory avoids
-// rereading a large directory once per returned entry: retained cache is bounded
-// by the budget plus one directory, even when that directory exceeds the budget.
+// spillFailed backs off index writes after err, leaving resident state intact.
+func (t *nodeTable) spillFailed(err error) {
+	t.spillErr = err
+	if t.spillBackoff == 0 {
+		t.spillBackoff = 100 * time.Millisecond
+	} else {
+		t.spillBackoff = min(2*t.spillBackoff, 30*time.Second)
+	}
+	t.spillRetry = time.Now().Add(t.spillBackoff)
+}
+
+// trimCache drops whole cold directories, then the cold logged nodes
+// themselves. Keeping the current directory avoids rereading a large directory
+// once per returned entry: retained cache is bounded by the budget plus one
+// directory and its ancestors, even when that directory exceeds the budget.
 func (t *nodeTable) trimCache() {
-	if len(t.coldGarbage) > 0 {
+	if len(t.coldGarbage) > 0 || len(t.deadKeys) > 0 || len(t.deadFiles) > 0 {
 		t.cleanCold()
 	}
 	if t.cacheUsed <= t.cacheLimit && t.spillErr == nil {
@@ -237,7 +269,7 @@ func (t *nodeTable) trimCache() {
 	}
 	for t.cacheUsed > t.cacheLimit && t.cacheLRU.Len() > 1 {
 		candidate := t.cacheLRU.Back()
-		for candidate != t.cacheLRU.Front() && candidate.Value.(*node).dir.reading > 0 {
+		for candidate != t.cacheLRU.Front() && !t.reclaimable(candidate.Value.(*node)) {
 			candidate = candidate.Prev()
 		}
 		if candidate == t.cacheLRU.Front() {
@@ -247,13 +279,7 @@ func (t *nodeTable) trimCache() {
 		written, err := t.spillNames(d)
 		if err != nil {
 			// A failed replacement leaves the old index and resident owners intact.
-			t.spillErr = err
-			if t.spillBackoff == 0 {
-				t.spillBackoff = 100 * time.Millisecond
-			} else {
-				t.spillBackoff = min(2*t.spillBackoff, 30*time.Second)
-			}
-			t.spillRetry = time.Now().Add(t.spillBackoff)
+			t.spillFailed(err)
 			return
 		}
 		if !written || t.byID[d.id] != d || d.dir.reading != 0 || d.dir.recent == t.cacheLRU.Front() || t.cacheUsed <= t.cacheLimit {
@@ -262,8 +288,19 @@ func (t *nodeTable) trimCache() {
 		t.spillErr = nil
 		t.spillRetry = time.Time{}
 		t.spillBackoff = 0
-		t.uncache(d)
+		if t.trimmed(d) {
+			if d.dir.coldDirty || !t.evictable(d) || !t.evictNode(d) {
+				return
+			}
+			continue
+		}
 		s := d.dir
+		t.cacheUsed -= s.cached - s.logged
+		s.cached = s.logged
+		if s.cached == 0 {
+			t.cacheLRU.Remove(s.recent)
+			s.recent = nil
+		}
 		s.gen++ // an in-flight listing must not resurrect the evicted snapshot
 		s.entries, s.dups, s.leaves = nil, nil, nil
 		s.coldLoaded = false
@@ -297,6 +334,9 @@ func (t *nodeTable) retain(id uint64) func() {
 	defer t.trimCache()
 	defer t.flush()
 	n := t.byID[id]
+	if n == nil {
+		n = t.pageID(id)
+	}
 	if n == nil {
 		d, name := t.resolve(id)
 		// Resolution may wait while another retainer materializes or moves it.

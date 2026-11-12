@@ -1,12 +1,14 @@
 package export
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,8 +33,9 @@ const (
 // errNodeLog reports a log that is inconsistent rather than torn.
 var errNodeLog = errors.New("invalid node identity log")
 
-// openNodeTable replays complete records and atomically compacts the logged
-// identities. A log of the earlier JSON format contributes only its counter
+// openNodeTable replays complete records, atomically compacts the logged
+// identities and builds the index they page out to, leaving only the root
+// resident. A log of the earlier JSON format contributes only its counter
 // watermark: its ids go stale rather than ever naming another file.
 func openNodeTable(name string, list func(dir string) ([]os.FileInfo, error)) (*nodeTable, error) {
 	t := newNodeTable(list)
@@ -40,20 +43,24 @@ func openNodeTable(name string, list func(dir string) ([]os.FileInfo, error)) (*
 		return nil, err
 	}
 	data, err := os.ReadFile(name)
+	r := newReplayTable()
 	switch {
 	case errors.Is(err, os.ErrNotExist), err == nil && len(data) == 0:
 	case err != nil:
 		return nil, err
 	case bytes.HasPrefix(data, nodeLogMagic):
-		if err := t.replay(data[len(nodeLogMagic):]); err != nil {
+		if err := r.replay(data[len(nodeLogMagic):]); err != nil {
 			return nil, err
 		}
 	case data[0] == '{':
-		t.next = max(t.next, legacyWatermark(data))
+		r.next = max(r.next, legacyWatermark(data))
 	default:
 		return nil, errNodeLog
 	}
-	if err := t.compact(name); err != nil {
+	logSize := int64(len(data))
+	data = nil // the replayed names are copies
+	t.next = r.next
+	if err := r.compact(name); err != nil {
 		return nil, err
 	}
 	t.log, err = os.OpenFile(name, os.O_APPEND|os.O_WRONLY, 0o600)
@@ -61,10 +68,14 @@ func openNodeTable(name string, list func(dir string) ([]os.FileInfo, error)) (*
 		return nil, err
 	}
 	// The registry owns the state lock before opening the export. Distinct
-	// logs use distinct stores; only an index a clean close completed for
-	// exactly this log is adopted.
+	// logs use distinct stores; only owner indexes a clean close completed
+	// for exactly this log are adopted.
 	t.coldParent = name + ".cache"
-	if err = t.openColdStore(int64(len(data))); err != nil {
+	prior, err := t.openColdStore(logSize)
+	if err == nil {
+		err = t.buildIndex(r, prior)
+	}
+	if err != nil {
 		t.log.Close()
 		return nil, err
 	}
@@ -95,18 +106,60 @@ func legacyWatermark(data []byte) uint64 {
 	return next
 }
 
+// replayed is a logged node while the log replays at open. Its tree links
+// are indexes into replayTable.nodes, -1 for none, so the whole logged tree
+// costs about a hundred bytes per node until the index is built from it.
+type replayed struct {
+	id, key uint64
+	name    string
+	parent  int32
+	child   int32 // first child
+	next    int32 // next sibling
+	prev    int32 // previous sibling
+	same    int32 // next node in the same name bucket
+}
+
+// replayTable is the logged tree the log describes, discarded once the log
+// is compacted and the index built.
+type replayTable struct {
+	nodes   []replayed
+	keys    map[uint64]int32 // live keys; the root is node 0
+	names   map[uint64]int32 // first node of each (parent key, name) hash bucket
+	derived []uint64         // every derived id placed, each at most once
+	retired map[int32][]uint32
+	next    uint64
+}
+
+func newReplayTable() *replayTable {
+	return &replayTable{
+		nodes:   []replayed{{id: 1, key: 1, parent: -1, child: -1, next: -1, prev: -1, same: -1}},
+		keys:    map[uint64]int32{1: 0},
+		names:   map[uint64]int32{},
+		retired: map[int32][]uint32{},
+		next:    2,
+	}
+}
+
 // replay applies records up to a torn tail: a record cut short by a crash,
-// or the zeros a filesystem may leave after one.
-func (t *nodeTable) replay(b []byte) error {
-	r := logReader{b: b}
-	for len(r.b) > 0 {
-		if err := t.apply(&r); err != nil {
-			if errors.Is(err, errTorn) || bytes.Count(r.rest, []byte{0}) == len(r.rest) {
-				return nil
+// or the zeros a filesystem may leave after one. A derived id placed twice
+// contradicts the log: retired derived ids are never issued again.
+func (r *replayTable) replay(b []byte) error {
+	lr := logReader{b: b}
+	for len(lr.b) > 0 {
+		if err := r.apply(&lr); err != nil {
+			if !errors.Is(err, errTorn) && bytes.Count(lr.rest, []byte{0}) != len(lr.rest) {
+				return err
 			}
-			return err
+			break
 		}
 	}
+	slices.Sort(r.derived)
+	for i := 1; i < len(r.derived); i++ {
+		if r.derived[i] == r.derived[i-1] {
+			return errNodeLog
+		}
+	}
+	r.derived = nil
 	return nil
 }
 
@@ -156,116 +209,234 @@ func (r *logReader) name() string {
 }
 
 // apply decodes and replays one record.
-func (t *nodeTable) apply(r *logReader) error {
-	r.rest = r.b
-	op := r.b[0]
-	r.b = r.b[1:]
+func (r *replayTable) apply(lr *logReader) error {
+	lr.rest = lr.b
+	op := lr.b[0]
+	lr.b = lr.b[1:]
 	switch op {
 	case opCounter:
-		id, parent, name := r.uvarint(), r.uvarint(), r.name()
-		if r.err != nil {
-			return r.err
+		id, parent, name := lr.uvarint(), lr.uvarint(), lr.name()
+		if lr.err != nil {
+			return lr.err
 		}
 		if id >= derivedBit {
 			return errNodeLog
 		}
-		return t.place(id, id, parent, name)
+		return r.place(id, id, parent, name)
 	case opPin:
-		parent, name, key := r.uvarint(), r.name(), r.uvarint()
-		if r.err != nil {
-			return r.err
+		parent, name, key := lr.uvarint(), lr.name(), lr.uvarint()
+		if lr.err != nil {
+			return lr.err
 		}
 		if parent >= maxDerivingKey {
 			return errNodeLog
 		}
-		return t.place(derivedID(parent, nameHash(name)), key, parent, name)
+		return r.place(derivedID(parent, nameHash(name)), key, parent, name)
 	case opPinAt:
-		id, parent, name, key := r.uvarint(), r.uvarint(), r.name(), r.uvarint()
-		if r.err != nil {
-			return r.err
+		id, parent, name, key := lr.uvarint(), lr.uvarint(), lr.name(), lr.uvarint()
+		if lr.err != nil {
+			return lr.err
 		}
 		if id&derivedBit == 0 || id >= idLimit {
 			return errNodeLog
 		}
-		return t.place(id, key, parent, name)
+		return r.place(id, key, parent, name)
 	case opMove:
-		key, parent, name := r.uvarint(), r.uvarint(), r.name()
-		if r.err != nil {
-			return r.err
+		key, parent, name := lr.uvarint(), lr.uvarint(), lr.name()
+		if lr.err != nil {
+			return lr.err
 		}
-		n, d := t.byKey[key], t.byKey[parent]
-		if n == nil || d == nil || n == t.root {
-			return errNodeLog
-		}
-		for c := d; c != nil; c = c.parent {
-			if c == n {
-				return errNodeLog
-			}
-		}
-		if dst := d.kids[name]; dst != n {
-			t.drop(dst)
-		}
-		delete(n.parent.kids, n.name)
-		n.name, n.parent = name, d
-		t.link(d, n)
-		return nil
+		return r.move(key, parent, name)
 	case opRemove:
-		key := r.uvarint()
-		if r.err != nil {
-			return r.err
+		key := lr.uvarint()
+		if lr.err != nil {
+			return lr.err
 		}
-		t.drop(t.byKey[key])
+		if i, ok := r.keys[key]; ok && i != 0 {
+			r.drop(i)
+		}
 		return nil
 	case opNext:
-		next := r.uvarint()
-		if r.err != nil {
-			return r.err
+		next := lr.uvarint()
+		if lr.err != nil {
+			return lr.err
 		}
-		t.next = max(t.next, next)
+		r.next = max(r.next, next)
 		return nil
 	}
 	return errNodeLog
 }
 
+// bucket hashes a parent key and a name for the names index.
+func bucket(parent uint64, name string) uint64 {
+	h := uint64(14695981039346656037)
+	for i := range 8 {
+		h ^= parent >> (8 * i) & 255
+		h *= 1099511628211
+	}
+	for i := range len(name) {
+		h ^= uint64(name[i])
+		h *= 1099511628211
+	}
+	return h
+}
+
+// child returns parent's child name, or -1.
+func (r *replayTable) child(parent int32, name string) int32 {
+	i, ok := r.names[bucket(r.nodes[parent].key, name)]
+	for ; ok && i >= 0; i = r.nodes[i].same {
+		if r.nodes[i].parent == parent && r.nodes[i].name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// attach links node i under parent.
+func (r *replayTable) attach(i, parent int32) {
+	n := &r.nodes[i]
+	n.parent, n.prev, n.next = parent, -1, r.nodes[parent].child
+	if n.next >= 0 {
+		r.nodes[n.next].prev = i
+	}
+	r.nodes[parent].child = i
+	h := bucket(r.nodes[parent].key, n.name)
+	n.same = -1
+	if head, ok := r.names[h]; ok {
+		n.same = head
+	}
+	r.names[h] = i
+}
+
+// detach unlinks node i from its parent.
+func (r *replayTable) detach(i int32) {
+	n := r.nodes[i]
+	if n.prev >= 0 {
+		r.nodes[n.prev].next = n.next
+	} else {
+		r.nodes[n.parent].child = n.next
+	}
+	if n.next >= 0 {
+		r.nodes[n.next].prev = n.prev
+	}
+	h := bucket(r.nodes[n.parent].key, n.name)
+	if head := r.names[h]; head == i {
+		if n.same >= 0 {
+			r.names[h] = n.same
+		} else {
+			delete(r.names, h)
+		}
+	} else {
+		for j := head; j >= 0; j = r.nodes[j].same {
+			if r.nodes[j].same == i {
+				r.nodes[j].same = n.same
+				break
+			}
+		}
+	}
+}
+
 // place replays a logged node under the directory keyed parent.
-func (t *nodeTable) place(id, key, parent uint64, name string) error {
-	d := t.byKey[parent]
-	if d == nil || id < 2 || key < 2 || t.byID[id] != nil || t.byKey[key] != nil || d.kids[name] != nil {
+func (r *replayTable) place(id, key, parent uint64, name string) error {
+	p, ok := r.keys[parent]
+	if !ok || id < 2 || key < 2 || r.child(p, name) >= 0 {
 		return errNodeLog
 	}
-	k := &node{id: id, key: key, name: name, parent: d}
-	t.link(d, k)
-	t.byKey[key] = k
-	if key >= t.next {
-		t.next = key + 1
+	if _, live := r.keys[key]; live {
+		return errNodeLog
 	}
+	if id&derivedBit != 0 {
+		r.derived = append(r.derived, id)
+	}
+	i := int32(len(r.nodes))
+	r.nodes = append(r.nodes, replayed{id: id, key: key, name: name, child: -1})
+	r.attach(i, p)
+	r.keys[key] = i
+	r.next = max(r.next, key+1)
 	return nil
+}
+
+// move replays a logged node's move, retiring whatever it replaced.
+func (r *replayTable) move(key, parent uint64, name string) error {
+	n, ok := r.keys[key]
+	d, okParent := r.keys[parent]
+	if !ok || !okParent || n == 0 {
+		return errNodeLog
+	}
+	for c := d; c >= 0; c = r.nodes[c].parent {
+		if c == n {
+			return errNodeLog
+		}
+	}
+	if dst := r.child(d, name); dst >= 0 && dst != n {
+		r.drop(dst)
+	}
+	r.detach(n)
+	r.nodes[n].name = name
+	r.attach(n, d)
+	return nil
+}
+
+// drop retires node i's subtree: its keys die, and the derived ids it held
+// stay reserved in the live directories they derive from.
+func (r *replayTable) drop(i int32) {
+	r.detach(i)
+	stack, dropped := []int32{i}, []int32(nil)
+	for len(stack) > 0 {
+		j := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		dropped = append(dropped, j)
+		delete(r.keys, r.nodes[j].key)
+		delete(r.retired, j)
+		for c := r.nodes[j].child; c >= 0; c = r.nodes[c].next {
+			stack = append(stack, c)
+		}
+	}
+	for _, j := range dropped {
+		if id := r.nodes[j].id; id&derivedBit != 0 {
+			if o, ok := r.keys[id>>hashBits&(maxDerivingKey-1)]; ok {
+				r.retired[o] = append(r.retired[o], uint32(id&(1<<hashBits-1)))
+			}
+		}
+	}
 }
 
 // compact atomically replaces the log with the logged nodes, parents first,
 // and the counter watermark.
-func (t *nodeTable) compact(name string) error {
-	b := append([]byte(nil), nodeLogMagic...)
-	queue := []*node{t.root}
-	for i := 0; i < len(queue); i++ {
-		for _, k := range queue[i].kids {
-			if k.key != 0 {
-				b = appendNode(b, k)
-				queue = append(queue, k)
-			}
-		}
-	}
-	b = binary.AppendUvarint(append(b, opNext), t.next)
+func (r *replayTable) compact(name string) error {
 	tmp, err := os.CreateTemp(filepath.Dir(name), ".nodes-*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
+	w := bufio.NewWriterSize(tmp, 1<<20)
+	b := append([]byte(nil), nodeLogMagic...)
+	queue := []int32{0}
+	for len(queue) > 0 {
+		p := queue[0]
+		queue = queue[1:]
+		for c := r.nodes[p].child; c >= 0; c = r.nodes[c].next {
+			k := &r.nodes[c]
+			b = appendPlace(b, k.id, k.key, r.nodes[p].key, k.name)
+			queue = append(queue, c)
+		}
+		if len(b) >= 1<<16 {
+			if _, err := w.Write(b); err != nil {
+				tmp.Close()
+				return err
+			}
+			b = b[:0]
+		}
 	}
-	if err := durable.Sync(tmp); err != nil {
+	b = binary.AppendUvarint(append(b, opNext), r.next)
+	_, err = w.Write(b)
+	if err == nil {
+		err = w.Flush()
+	}
+	if err == nil {
+		err = durable.Sync(tmp)
+	}
+	if err != nil {
 		tmp.Close()
 		return err
 	}
@@ -280,20 +451,25 @@ func (t *nodeTable) compact(name string) error {
 
 // appendNode encodes the record that places logged node k at its position.
 func appendNode(b []byte, k *node) []byte {
-	pk := k.parent.key
+	return appendPlace(b, k.id, k.key, k.parent.key, k.name)
+}
+
+// appendPlace encodes the record placing a logged node under the directory
+// keyed parent.
+func appendPlace(b []byte, id, key, parent uint64, name string) []byte {
 	switch {
-	case k.id == k.key:
-		b = binary.AppendUvarint(append(b, opCounter), k.id)
-		b = binary.AppendUvarint(b, pk)
-		return appendName(b, k.name)
-	case pk < maxDerivingKey && k.id == derivedID(pk, nameHash(k.name)):
-		b = binary.AppendUvarint(append(b, opPin), pk)
+	case id == key:
+		b = binary.AppendUvarint(append(b, opCounter), id)
+		b = binary.AppendUvarint(b, parent)
+		return appendName(b, name)
+	case parent < maxDerivingKey && id == derivedID(parent, nameHash(name)):
+		b = binary.AppendUvarint(append(b, opPin), parent)
 	default:
-		b = binary.AppendUvarint(append(b, opPinAt), k.id)
-		b = binary.AppendUvarint(b, pk)
+		b = binary.AppendUvarint(append(b, opPinAt), id)
+		b = binary.AppendUvarint(b, parent)
 	}
-	b = appendName(b, k.name)
-	return binary.AppendUvarint(b, k.key)
+	b = appendName(b, name)
+	return binary.AppendUvarint(b, key)
 }
 
 // appendName encodes a basename.
@@ -317,10 +493,10 @@ func (t *nodeTable) recordMove(k *node) {
 	}
 }
 
-// recordRemove queues the retirement of logged node k's subtree.
-func (t *nodeTable) recordRemove(k *node) {
+// recordRemove queues the retirement of the subtree of the logged node keyed key.
+func (t *nodeTable) recordRemove(key uint64) {
 	if t.log != nil && t.logErr == nil {
-		t.pending = binary.AppendUvarint(append(t.pending, opRemove), k.key)
+		t.pending = binary.AppendUvarint(append(t.pending, opRemove), key)
 	}
 }
 
@@ -385,6 +561,9 @@ func (t *nodeTable) close() error {
 		defer t.mu.Unlock()
 		if t.log != nil {
 			complete := t.completeIndex()
+			if complete && t.index != nil {
+				complete = t.saveOwners() == nil
+			}
 			if err := durable.Sync(t.log); err != nil && t.logErr == nil {
 				t.logErr = err
 			}
@@ -396,6 +575,10 @@ func (t *nodeTable) close() error {
 				// Without the manifest the next open discards the index.
 				_ = t.saveColdStore(info.Size())
 			}
+			t.coldSaved = true // a request still running never pages a node out
+		}
+		if t.index != nil {
+			t.index.close()
 		}
 		if t.coldParent == "" && t.coldRoot != "" {
 			// Tables without a log own a private temporary store, not state.
