@@ -1,5 +1,8 @@
-// Package fsys is the filesystem layer the search tools read through:
-// directory listings, file contents, and change stamps.
+// Package fsys is the native directory and file access layer shared by the
+// search tools, source capture and the base view: compact directory listings,
+// file contents, and change stamps through [FS] and [Session], and complete
+// lstat-compatible directory listings through [ReadDir]. Both run on the same
+// per-platform syscall fast paths.
 //
 // [Native] is the host filesystem with per-platform syscall fast paths
 // (native_darwin.go, native_linux.go, native_windows.go); [FromIOFS] adapts
@@ -81,6 +84,10 @@ type Session interface {
 	// stop symlink cycles. errors.ErrUnsupported when the filesystem has
 	// no identities.
 	Identify(path string) (ID, error)
+	// IdentifyDir returns the identity of the open directory h without
+	// resolving a path; errors.ErrUnsupported when the filesystem has no
+	// identities or handles are not descriptors.
+	IdentifyDir(h Handle) (ID, error)
 	// StableStamps reports whether every change to a directory on h's
 	// filesystem (whose stamp is st) yields a different stamp: timestamps
 	// are fine-grained and maintained locally. Listing caches rely on it.
@@ -194,6 +201,10 @@ const (
 	// regular files. Darwin and Windows return these from the bulk listing;
 	// Linux pays one statx per entry.
 	Full
+	// metadataDetail is [ReadDir]'s listing: every entry, special files and
+	// symlinks included, with complete lstat metadata or the error describing
+	// it, collected into session.entries rather than the compact listing.
+	metadataDetail
 )
 
 // Listing is one directory's entries, owned by the Session that read it.

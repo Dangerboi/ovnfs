@@ -1,0 +1,76 @@
+//go:build darwin || linux
+
+package fsys
+
+import (
+	"io/fs"
+	"os"
+	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
+
+// nativeInfo is one entry of a [ReadDir] listing: its complete lstat data as
+// both [os.FileInfo] and [os.DirEntry]. Sys is the *syscall.Stat_t that
+// [os.Lstat] reports.
+type nativeInfo struct {
+	name string
+	mode os.FileMode
+	mod  time.Time
+	st   syscall.Stat_t
+}
+
+func (e *nativeInfo) Name() string               { return e.name }
+func (e *nativeInfo) Size() int64                { return e.st.Size }
+func (e *nativeInfo) Mode() fs.FileMode          { return e.mode }
+func (e *nativeInfo) ModTime() time.Time         { return e.mod }
+func (e *nativeInfo) IsDir() bool                { return e.mode.IsDir() }
+func (e *nativeInfo) Sys() any                   { return &e.st }
+func (e *nativeInfo) Type() fs.FileMode          { return e.mode.Type() }
+func (e *nativeInfo) Info() (fs.FileInfo, error) { return e, nil }
+
+// infoSlabSize is how many nativeInfo values one allocation holds.
+const infoSlabSize = 32
+
+// newInfo appends a zeroed nativeInfo to *slab, starting a new slab when the
+// current one is full, and returns it. Earlier values stay where they are.
+func newInfo(slab *[]nativeInfo) *nativeInfo {
+	if len(*slab) == cap(*slab) {
+		*slab = make([]nativeInfo, 0, infoSlabSize)
+	}
+	*slab = append(*slab, nativeInfo{})
+	return &(*slab)[len(*slab)-1]
+}
+
+// dropInfo releases the nativeInfo newInfo returned last.
+func dropInfo(slab *[]nativeInfo) { *slab = (*slab)[:len(*slab)-1] }
+
+// modeFromStat converts st_mode to [os.FileMode] as the os package does.
+func modeFromStat(mode uint32) os.FileMode {
+	m := os.FileMode(mode & 0o777)
+	switch mode & unix.S_IFMT {
+	case unix.S_IFBLK:
+		m |= os.ModeDevice
+	case unix.S_IFCHR:
+		m |= os.ModeDevice | os.ModeCharDevice
+	case unix.S_IFDIR:
+		m |= os.ModeDir
+	case unix.S_IFIFO:
+		m |= os.ModeNamedPipe
+	case unix.S_IFLNK:
+		m |= os.ModeSymlink
+	case unix.S_IFSOCK:
+		m |= os.ModeSocket
+	}
+	if mode&unix.S_ISGID != 0 {
+		m |= os.ModeSetgid
+	}
+	if mode&unix.S_ISUID != 0 {
+		m |= os.ModeSetuid
+	}
+	if mode&unix.S_ISVTX != 0 {
+		m |= os.ModeSticky
+	}
+	return m
+}

@@ -1,8 +1,8 @@
 package export
 
 import (
+	"fmt"
 	"os"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +15,7 @@ func pathOf(t *testing.T, nt *nodeTable, id uint64) string {
 	if !ok {
 		return "<stale>"
 	}
-	return strings.Join(p, "/")
+	return p
 }
 
 // namespace is an in-memory tree of entry paths, listed for the node table
@@ -140,8 +140,8 @@ func TestRemovedHandlesGoStaleAndNamesGetFreshIDs(t *testing.T) {
 		if id := nt.id("x/y"); id == old || nt.id("x") == oldDir {
 			t.Fatal("recreated path reused a retired id")
 		}
-		if p, _ := nt.path(1); !slices.Equal(p, []string{}) {
-			t.Fatalf("root path = %v", p)
+		if p, ok := nt.path(1); !ok || p != "" {
+			t.Fatalf("root path = %q, %v", p, ok)
 		}
 	}
 }
@@ -270,5 +270,48 @@ func TestCheckoutRetirementLeavesOtherIdentitiesLive(t *testing.T) {
 	}
 	if got := pathOf(t, nt, b); got != "ab/file" {
 		t.Fatalf("other checkout: %s", got)
+	}
+}
+
+// TestDeepPathsAndLocations protects paths and location snapshots deeper than
+// both the inline snapshot and the stack used to build paths.
+func TestDeepPathsAndLocations(t *testing.T) {
+	parts := make([]string, pathStack+inlineDepth)
+	for i := range parts {
+		parts[i] = fmt.Sprintf("d%d", i)
+	}
+	dir := strings.Join(parts, "/")
+	file := dir + "/file"
+	ns := newNamespace(file)
+	nt := newNodeTable(ns.list)
+	defer nt.close()
+	id := nt.id(file)
+	if got := pathOf(t, nt, id); got != file {
+		t.Fatalf("deep path = %q, want %q", got, file)
+	}
+
+	nt.mu.Lock()
+	d := nt.find(dir)
+	loc := locate(d)
+	same := loc.holds(d)
+	nt.mu.Unlock()
+	if d == nil || len(loc.deep) == 0 || !same {
+		t.Fatal("deep location did not snapshot or overflow")
+	}
+
+	// The top ancestor is the last overflow entry: moving it away and back
+	// must still be rejected, though every path matches again.
+	ns.move("d0", "away")
+	nt.rename("d0", "away")
+	ns.move("away", "d0")
+	nt.rename("away", "d0")
+	nt.mu.Lock()
+	moved := !loc.holds(nt.find(dir))
+	nt.mu.Unlock()
+	if !moved {
+		t.Fatal("location accepted a deep ancestor that moved away and back")
+	}
+	if got := pathOf(t, nt, id); got != file {
+		t.Fatalf("deep path after moves = %q, want %q", got, file)
 	}
 }

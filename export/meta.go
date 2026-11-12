@@ -49,9 +49,14 @@ func (n *nodeFS) ReadDir(name string) ([]os.FileInfo, error) {
 	}
 	out := infos[:0]
 	for _, info := range infos {
-		if !overlay.AppleDouble(info.Name()) {
-			out = append(out, n.linked(path.Join(name, info.Name()), info))
+		if overlay.AppleDouble(info.Name()) {
+			continue
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			// Only a link needs its path, to resolve its target on demand.
+			info = n.linked(path.Join(name, info.Name()), info)
+		}
+		out = append(out, info)
 	}
 	return out, nil
 }

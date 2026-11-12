@@ -262,7 +262,7 @@ func (t *nodeTable) subtree(p string) []uint64 {
 			n            *node
 			s            *dirState
 			gen, version uint64
-			location     []nodePosition
+			location     nodeLocation
 		}
 		var dirs []snapshot
 		var out []uint64
@@ -274,7 +274,7 @@ func (t *nodeTable) subtree(p string) []uint64 {
 			}
 			if s := n.dir; s != nil {
 				s.reading++
-				dirs = append(dirs, snapshot{n, s, s.gen, s.version, nodeLocation(n)})
+				dirs = append(dirs, snapshot{n, s, s.gen, s.version, locate(n)})
 				for h := range s.leaves {
 					out = append(out, derivedID(n.key, h))
 				}
@@ -299,7 +299,7 @@ func (t *nodeTable) subtree(p string) []uint64 {
 		}
 		for _, old := range dirs {
 			old.s.reading--
-			if t.byID[old.n.id] != old.n || old.s.gen != old.gen || old.s.version != old.version || !sameLocation(old.n, old.location) {
+			if t.byID[old.n.id] != old.n || old.s.gen != old.gen || old.s.version != old.version || !old.location.holds(old.n) {
 				valid = false
 			}
 		}
@@ -315,49 +315,72 @@ func (t *nodeTable) subtree(p string) []uint64 {
 	}
 }
 
-// path returns the current path components of id, or false if the id is
-// unknown (never issued, removed, or replaced by a rename). A derived id
-// issued before a restart is resolved through its parent directory.
-func (t *nodeTable) path(id uint64) (parts []string, ok bool) {
+// path returns the current export-relative path of id, or false if the id is
+// unknown (never issued, removed, or replaced by a rename). The export root
+// is the empty path. A derived id issued before a restart is resolved
+// through its parent directory.
+func (t *nodeTable) path(id uint64) (p string, ok bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	defer func() {
 		t.trimCache()
 		if t.cacheErr != nil {
-			parts, ok = nil, false
+			p, ok = "", false
 		}
 	}()
 	if t.cacheErr != nil {
-		return nil, false
+		return "", false
 	}
 	if n := t.byID[id]; n != nil {
 		if n.key == 0 {
 			t.touch(n.parent)
 		}
-		return n.components(0), true
+		return n.fullPath(), true
 	}
 	d, name := t.resolve(id)
 	if d == nil {
-		return nil, false
+		return "", false
 	}
-	out := d.components(1)
-	out[len(out)-1] = name
-	return out, true
+	return d.childPath(name), true
 }
 
-// components returns n's path components followed by extra empty ones.
-func (n *node) components(extra int) []string {
-	depth := extra
+// pathStack is the ancestor count joinPath holds without allocating.
+const pathStack = 32
+
+// fullPath returns n's export-relative path, empty for the root, while the
+// mutex is held. Paths are never cached: renames change them.
+func (n *node) fullPath() string { return n.joinPath("", false) }
+
+// childPath returns the path of name under n.
+func (n *node) childPath(name string) string { return n.joinPath(name, true) }
+
+// joinPath builds the path of n, followed by tail when tailed, in one
+// exactly sized allocation. The chain of ancestors is walked leaf-first into
+// stack storage, which spills to the heap only beyond pathStack levels.
+func (n *node) joinPath(tail string, tailed bool) string {
+	var buf [pathStack]*node
+	chain := buf[:0]
+	size := 0
 	for c := n; c.parent != nil; c = c.parent {
-		depth++
+		chain = append(chain, c)
+		size += len(c.name) + 1
 	}
-	out := make([]string, depth)
-	depth -= extra
-	for c := n; c.parent != nil; c = c.parent {
-		depth--
-		out[depth] = c.name
+	if tailed {
+		size += len(tail) + 1
 	}
-	return out
+	if size == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(size - 1)
+	for i := len(chain) - 1; i >= 0; i-- {
+		b.WriteString(chain[i].name)
+		if i > 0 || tailed {
+			b.WriteByte('/')
+		}
+	}
+	b.WriteString(tail)
+	return b.String()
 }
 
 // rename moves from's subtree to to, retiring whatever ids to held.
@@ -465,7 +488,7 @@ func (t *nodeTable) created(p string) {
 type listing struct {
 	dir      *node
 	gen      uint64
-	location []nodePosition
+	location nodeLocation
 }
 
 type nodePosition struct {
@@ -473,16 +496,45 @@ type nodePosition struct {
 	moves uint64
 }
 
-func nodeLocation(n *node) []nodePosition {
-	var out []nodePosition
-	for ; n != nil; n = n.parent {
-		out = append(out, nodePosition{n, n.moves})
-	}
-	return out
+// inlineDepth is the number of ancestors a nodeLocation holds without a
+// separate allocation; deeper paths overflow into a slice.
+const inlineDepth = 8
+
+// nodeLocation snapshots a node and every ancestor with its move counter, so
+// a later check rejects any relocation of the node or an ancestor, including
+// a move away and back to the same path. It is a plain value: copies share
+// only the immutable overflow slice.
+type nodeLocation struct {
+	inline [inlineDepth]nodePosition // n, then its ancestors up to the root
+	deep   []nodePosition            // the ancestors past inlineDepth
+	count  int                       // positions held inline
 }
 
-func sameLocation(n *node, location []nodePosition) bool {
-	for _, old := range location {
+// locate snapshots n's location. The mutex must be held.
+func locate(n *node) nodeLocation {
+	var loc nodeLocation
+	for ; n != nil; n = n.parent {
+		p := nodePosition{n, n.moves}
+		if loc.count < inlineDepth {
+			loc.inline[loc.count] = p
+			loc.count++
+		} else {
+			loc.deep = append(loc.deep, p)
+		}
+	}
+	return loc
+}
+
+// holds reports whether n still has exactly the ancestry and move counters
+// the snapshot recorded. The mutex must be held.
+func (loc *nodeLocation) holds(n *node) bool {
+	for _, old := range loc.inline[:loc.count] {
+		if n != old.n || n.moves != old.moves {
+			return false
+		}
+		n = n.parent
+	}
+	for _, old := range loc.deep {
 		if n != old.n || n.moves != old.moves {
 			return false
 		}
@@ -507,7 +559,7 @@ func (t *nodeTable) startListing(dir string) listing {
 		return listing{}
 	}
 	t.touch(n)
-	return listing{dir: n, gen: n.state().gen, location: nodeLocation(n)}
+	return listing{dir: n, gen: n.state().gen, location: locate(n)}
 }
 
 // observe installs the entries a directory read returned, letting the
@@ -519,7 +571,7 @@ func (t *nodeTable) observe(l listing, infos []os.FileInfo) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	defer t.trimCache()
-	if !sameLocation(l.dir, l.location) {
+	if !l.location.holds(l.dir) {
 		return
 	}
 	t.install(l.dir, l.gen, infos)
@@ -771,16 +823,16 @@ func (t *nodeTable) relist(d *node) (bool, error) {
 	s := d.state()
 	gen := s.gen
 	s.reading++
-	dir := t.nodePath(d)
-	location := nodeLocation(d)
+	dir := d.fullPath()
+	location := locate(d)
 	t.mu.Unlock()
 	infos, err := t.list(dir)
 	t.mu.Lock()
 	s.reading--
-	if !sameLocation(d, location) {
+	if !location.holds(d) {
 		return false, nil
 	}
-	if t.nodePath(d) != dir {
+	if d.fullPath() != dir {
 		return false, nil
 	}
 	if err != nil {
@@ -798,8 +850,8 @@ func (t *nodeTable) install(d *node, gen uint64, infos []os.FileInfo) bool {
 	if t.spillErr != nil {
 		return false
 	}
-	location := nodeLocation(d)
-	if !t.loadCold(d) || t.byID[d.id] != d || s.gen != gen || !sameLocation(d, location) {
+	location := locate(d)
+	if !t.loadCold(d) || t.byID[d.id] != d || s.gen != gen || !location.holds(d) {
 		return false
 	}
 	t.charge(d, -s.listBytes())
@@ -970,17 +1022,6 @@ func (n *node) state() *dirState {
 		n.dir = &dirState{}
 	}
 	return n.dir
-}
-
-// nodePath returns an export-relative path while the mutex is held.
-func (t *nodeTable) nodePath(n *node) string {
-	if n.parent == nil {
-		return ""
-	}
-	if n.parent == t.root {
-		return n.name
-	}
-	return t.nodePath(n.parent) + "/" + n.name
 }
 
 // node resolves p like find, turning a leaf into a node for an operation

@@ -16,6 +16,7 @@ import (
 
 	"github.com/stencil-hq/ovnfs/internal/clone"
 	"github.com/stencil-hq/ovnfs/internal/hostfile"
+	"github.com/stencil-hq/ovnfs/internal/search/fsys"
 	"github.com/stencil-hq/ovnfs/overlay"
 	"github.com/stencil-hq/ovnfs/rules"
 	"github.com/stencil-hq/ovnfs/source"
@@ -31,7 +32,7 @@ type bottom struct{ b *Base }
 
 // Lstat returns current metadata for unchanged and live paths, captured metadata otherwise.
 func (v bottom) Lstat(p string) (os.FileInfo, error) {
-	_, info, err := v.b.resolve(cleanPath(p))
+	_, info, err := v.b.resolve(overlay.Clean(p))
 	return info, err
 }
 
@@ -39,7 +40,7 @@ func (v bottom) Lstat(p string) (os.FileInfo, error) {
 // directories, whatever the folder holds now.
 func (v bottom) ReadDir(p string) ([]os.FileInfo, error) {
 	b := v.b
-	p = cleanPath(p)
+	p = overlay.Clean(p)
 	_, info, err := b.resolve(p)
 	if err != nil {
 		return nil, err
@@ -86,7 +87,7 @@ func (v bottom) ReadDir(p string) ([]os.FileInfo, error) {
 // the captured blob (from memory when the store caches it).
 func (v bottom) Open(p string) (overlay.Content, error) {
 	b := v.b
-	p = cleanPath(p)
+	p = overlay.Clean(p)
 	host, info, err := b.resolve(p)
 	if err != nil {
 		return nil, err
@@ -117,7 +118,7 @@ func (v bottom) Open(p string) (overlay.Content, error) {
 // folder: Bun on Windows, for one, links workspace packages by absolute path.
 func (v bottom) Readlink(p string) (string, error) {
 	b := v.b
-	p = cleanPath(p)
+	p = overlay.Clean(p)
 	host, info, err := b.resolve(p)
 	if err != nil {
 		return "", err
@@ -157,7 +158,7 @@ func (b *Base) relocate(host, target string) string {
 
 // CopyTo materializes p (a whole directory tree, for renames) at the new path dst for copy-up.
 func (v bottom) CopyTo(p, dst string) error {
-	p = cleanPath(p)
+	p = overlay.Clean(p)
 	_, info, err := v.b.resolve(p)
 	if err != nil {
 		return err
@@ -318,7 +319,7 @@ func (b *Base) Live(p string) bool {
 	if b.remote != nil {
 		return false
 	}
-	_, live := b.derivedRoot(cleanPath(p))
+	_, live := b.derivedRoot(overlay.Clean(p))
 	return live
 }
 
@@ -328,13 +329,13 @@ func (b *Base) Live(p string) bool {
 // name the capture never saw counts, since it may be source. Remote bases have
 // no folder to edit.
 func (b *Base) Affects(p string) bool {
-	p = cleanPath(p)
+	p = overlay.Clean(p)
 	if b.remote != nil || source.IsJJPath(p) {
 		return false
 	}
-	prefix := ""
-	for component := range strings.SplitSeq(p, "/") {
-		prefix = path.Join(prefix, component)
+	for end := 0; end < len(p); {
+		end = nextPrefixEnd(p, end)
+		prefix := p[:end]
 		if _, ok := b.sources[prefix]; ok {
 			continue
 		}
@@ -342,6 +343,19 @@ func (b *Base) Affects(p string) bool {
 		return !known
 	}
 	return true
+}
+
+// nextPrefixEnd returns the end of the root-relative clean path p's component
+// that starts after offset from (the next slash or len(p)), so p[:end] is the
+// next prefix without building it.
+func nextPrefixEnd(p string, from int) int {
+	if from > 0 {
+		from++ // skip the slash ending the previous prefix
+	}
+	if i := strings.IndexByte(p[from:], '/'); i >= 0 {
+		return from + i
+	}
+	return len(p)
 }
 
 // derivedRoot finds the first path prefix absent from the captured tree; live
@@ -352,9 +366,9 @@ func (b *Base) derivedRoot(p string) (root string, live bool) {
 	if p == "" {
 		return "", false
 	}
-	prefix := ""
-	for component := range strings.SplitSeq(p, "/") {
-		prefix = path.Join(prefix, component)
+	for end := 0; end < len(p); {
+		end = nextPrefixEnd(p, end)
+		prefix := p[:end]
 		if _, ok := b.sources[prefix]; ok {
 			continue
 		}
@@ -368,7 +382,7 @@ func (b *Base) derivedRoot(p string) (root string, live bool) {
 // need no further proof: p's ancestors were just proven and p was lstat'ed.
 func (b *Base) liveDir(p string) ([]os.FileInfo, error) {
 	dir := b.lower(p)
-	entries, err := os.ReadDir(dir)
+	entries, err := fsys.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -377,7 +391,7 @@ func (b *Base) liveDir(p string) ([]os.FileInfo, error) {
 		info, err := e.Info()
 		if err != nil {
 			if os.IsNotExist(err) {
-				continue
+				continue // removed during the listing
 			}
 			return nil, err
 		}

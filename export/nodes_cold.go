@@ -162,7 +162,7 @@ func (t *nodeTable) spillNames(d *node) (bool, error) {
 	var retired []uint32
 	var err error
 	if s.cold && !s.coldLoaded {
-		gen, location, ix := s.gen, nodeLocation(d), t.coldIndexOf(d)
+		gen, location, ix := s.gen, locate(d), t.coldIndexOf(d)
 		if s.indexing != nil {
 			return false, nil
 		}
@@ -174,7 +174,7 @@ func (t *nodeTable) spillNames(d *node) (bool, error) {
 		names, retired, err = readColdNames(ix)
 		t.mu.Lock()
 		s.reading--
-		if t.byID[d.id] != d || s.gen != gen || !sameLocation(d, location) {
+		if t.byID[d.id] != d || s.gen != gen || !location.holds(d) {
 			return false, nil
 		}
 	}
@@ -214,7 +214,7 @@ func (t *nodeTable) spillNames(d *node) (bool, error) {
 	if s.indexing != nil {
 		return false, nil
 	}
-	gen, version, location := s.gen, s.version, nodeLocation(d)
+	gen, version, location := s.gen, s.version, locate(d)
 	resident := !s.cold || s.coldLoaded
 	target := t.coldPath(d)
 	gone := maps.Clone(s.retired)
@@ -235,7 +235,7 @@ func (t *nodeTable) spillNames(d *node) (bool, error) {
 	s.reading--
 	close(s.indexing.done)
 	s.indexing = nil
-	valid := t.byID[d.id] == d && s.gen == gen && s.version == version && sameLocation(d, location)
+	valid := t.byID[d.id] == d && s.gen == gen && s.version == version && location.holds(d)
 	if err != nil {
 		return false, err
 	}
@@ -267,7 +267,7 @@ func (t *nodeTable) spillNames(d *node) (bool, error) {
 	// Publishing the first index does not discard its resident owners. A
 	// guard acquired during the write must still finish without recovery.
 	s.coldLoaded = s.coldLoaded || resident
-	valid = t.byID[d.id] == d && s.gen == gen && s.version == version && sameLocation(d, location)
+	valid = t.byID[d.id] == d && s.gen == gen && s.version == version && location.holds(d)
 	s.coldDirty = !valid
 	return valid, nil
 }
@@ -479,7 +479,7 @@ type coldOperation struct {
 	name     string
 	gone     bool // a single read found hash retired
 	gen      uint64
-	location []nodePosition
+	location nodeLocation
 	names    map[uint32]string
 	retired  []uint32
 	err      error
@@ -503,7 +503,7 @@ func (t *nodeTable) readOwners(d *node) (map[uint32]string, bool) {
 			}
 			return t.readResult(d, op)
 		}
-		op := &coldOperation{done: make(chan struct{}), read: true, prior: s.prior, gen: s.gen, location: nodeLocation(d)}
+		op := &coldOperation{done: make(chan struct{}), read: true, prior: s.prior, gen: s.gen, location: locate(d)}
 		s.indexing = op
 		s.reading++
 		ix := t.coldIndexOf(d)
@@ -524,7 +524,7 @@ func (t *nodeTable) readOwners(d *node) (map[uint32]string, bool) {
 // readResult validates a finished read for d. Retired hashes it found join
 // d's resident ones; an unreadable adopted index yields no owners.
 func (t *nodeTable) readResult(d *node, op *coldOperation) (map[uint32]string, bool) {
-	if t.cacheErr != nil || t.byID[d.id] != d || d.dir.gen != op.gen || !sameLocation(d, op.location) {
+	if t.cacheErr != nil || t.byID[d.id] != d || d.dir.gen != op.gen || !op.location.holds(d) {
 		return nil, false
 	}
 	if op.err != nil {
@@ -585,7 +585,7 @@ func (t *nodeTable) readOwner(d *node, hash uint32) (string, bool) {
 			_, valid := t.readResult(d, op)
 			return op.name, valid
 		}
-		op := &coldOperation{done: make(chan struct{}), read: true, single: true, prior: s.prior, hash: hash, gen: s.gen, location: nodeLocation(d)}
+		op := &coldOperation{done: make(chan struct{}), read: true, single: true, prior: s.prior, hash: hash, gen: s.gen, location: locate(d)}
 		s.indexing = op
 		s.reading++
 		ix := t.coldIndexOf(d)

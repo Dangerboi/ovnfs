@@ -24,6 +24,7 @@ package walk
 
 import (
 	"context"
+	"errors"
 	"os"
 	"runtime"
 	"slices"
@@ -693,8 +694,19 @@ func (wk *Worker) follow(dir string, name []byte) (fsys.FileInfo, bool) {
 		if wk.w.stopped() {
 			return info, false
 		}
-		up := wk.absPath(rel)
-		if a, err := wk.s.Identify(unsafe.String(unsafe.SliceData(up), len(up))); err == nil && a == id {
+		var a fsys.ID
+		var err error
+		if rel == dir && wk.dir.Valid() {
+			// The directory being emitted is already open: ask its descriptor.
+			a, err = wk.s.IdentifyDir(wk.dir)
+		} else {
+			err = errors.ErrUnsupported
+		}
+		if err != nil {
+			up := wk.absPath(rel)
+			a, err = wk.s.Identify(unsafe.String(unsafe.SliceData(up), len(up)))
+		}
+		if err == nil && a == id {
 			return info, false
 		}
 		if rel == "" {

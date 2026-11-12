@@ -122,11 +122,11 @@ func TestSparseColdReadRevalidated(t *testing.T) {
 			nt.indexIO = func() { once.Do(func() { close(entered); <-resume }) }
 			done := make(chan string, 1)
 			go func() {
-				parts, ok := nt.path(old)
+				p, ok := nt.path(old)
 				if !ok {
 					done <- ""
 				} else {
-					done <- strings.Join(parts, "/")
+					done <- p
 				}
 			}()
 			select {

@@ -17,9 +17,6 @@ import (
 // finished, waits for one in progress, or reads one no reader has started
 // itself, so it never waits behind the queue.
 
-// readers is how many directories are read ahead at once.
-const readers = 8
-
 // listing is a directory's entries sorted by name, with each entry's stat data
 // or the error reading it.
 type listing struct {

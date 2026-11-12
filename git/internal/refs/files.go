@@ -23,15 +23,15 @@ func (filesBackend) read(loc location, name string) (Ref, error) {
 	if !errors.Is(err, fs.ErrNotExist) || !loc.common {
 		return r, err
 	}
-	packed, err := readPackedRefs(filepath.Join(loc.dir, "packed-refs"), loc.format)
+	packed, err := readPackedRefs(filepath.Join(loc.dir, "packed-refs"), loc.format, func(n []byte) bool { return string(n) == name })
 	if err != nil {
 		return Ref{}, err
 	}
-	i, found := slices.BinarySearchFunc(packed, name, func(r Ref, name string) int { return strings.Compare(r.Name, name) })
-	if !found {
+	if len(packed) == 0 {
 		return Ref{}, notExist(name)
 	}
-	return packed[i], nil
+	// Duplicates keep file order; the first one wins.
+	return packed[0], nil
 }
 
 func (filesBackend) list(loc location, prefix string, keep func(string) bool) ([]Ref, error) {
@@ -42,16 +42,11 @@ func (filesBackend) list(loc location, prefix string, keep func(string) bool) ([
 	}
 	var packed []Ref
 	if loc.common {
-		all, err := readPackedRefs(filepath.Join(loc.dir, "packed-refs"), format)
+		p := []byte(prefix)
+		packed, err = readPackedRefs(filepath.Join(loc.dir, "packed-refs"), format, func(n []byte) bool { return bytes.HasPrefix(n, p) })
 		if err != nil {
 			return nil, err
 		}
-		start, _ := slices.BinarySearchFunc(all, prefix, func(r Ref, p string) int { return strings.Compare(r.Name, p) })
-		end := start
-		for end < len(all) && strings.HasPrefix(all[end].Name, prefix) {
-			end++
-		}
-		packed = all[start:end]
 	}
 	// Loose refs override packed ones of the same name.
 	out := make([]Ref, 0, len(loose)+len(packed))
@@ -194,9 +189,11 @@ func listLoose(dir, prefix string, format object.Format) ([]Ref, error) {
 	return out, nil
 }
 
-// readPackedRefs parses dir/packed-refs into name-sorted refs. A missing
-// file is an empty list. Peeled ('^') lines set the preceding ref's Peeled.
-func readPackedRefs(path string, format object.Format) ([]Ref, error) {
+// readPackedRefs parses packed-refs into name-sorted refs, retaining only
+// those whose name satisfies match (nil keeps all). The whole file is still
+// validated. A missing file is an empty list. Peeled ('^') lines set the
+// preceding ref's Peeled when that ref was retained.
+func readPackedRefs(path string, format object.Format, match func(name []byte) bool) ([]Ref, error) {
 	data, err := readFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -206,6 +203,7 @@ func readPackedRefs(path string, format object.Format) ([]Ref, error) {
 	}
 	var refs []Ref
 	sorted := true
+	seen, lastKept := false, false
 	n := format.HexSize()
 	for line := range bytes.Lines(data) {
 		line = bytes.TrimRight(line, "\r\n")
@@ -215,14 +213,16 @@ func readPackedRefs(path string, format object.Format) ([]Ref, error) {
 			// Only the header comment exists; its traits ("peeled",
 			// "fully-peeled", "sorted") are hints we can do without.
 		case line[0] == '^':
-			if len(refs) == 0 {
+			if !seen {
 				return nil, fmt.Errorf("refs: packed-refs: peeled line without a ref")
 			}
 			id, err := object.ParseIDFormat(format, string(line[1:]))
 			if err != nil {
 				return nil, fmt.Errorf("refs: packed-refs: %w", err)
 			}
-			refs[len(refs)-1].Peeled = id
+			if lastKept {
+				refs[len(refs)-1].Peeled = id
+			}
 		default:
 			if len(line) < n+2 || line[n] != ' ' {
 				return nil, fmt.Errorf("refs: packed-refs: unexpected line %q", line)
@@ -231,7 +231,13 @@ func readPackedRefs(path string, format object.Format) ([]Ref, error) {
 			if err != nil {
 				return nil, fmt.Errorf("refs: packed-refs: %w", err)
 			}
-			name := string(line[n+1:])
+			seen = true
+			nameBytes := line[n+1:]
+			lastKept = match == nil || match(nameBytes)
+			if !lastKept {
+				continue
+			}
+			name := string(nameBytes)
 			if len(refs) > 0 && refs[len(refs)-1].Name >= name {
 				sorted = false
 			}

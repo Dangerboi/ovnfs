@@ -56,8 +56,9 @@ func isAttrValue(v string) bool {
 type verifier struct {
 	w         *walker
 	repo      *git.Repo
-	path      string // the repository's root-relative work tree
-	started   bool   // conv and attrs were read
+	index     *git.Index // the captured index the repository's attributes fall back to
+	path      string     // the repository's root-relative work tree
+	started   bool       // conv and attrs were read
 	conv      git.Conversion
 	attrs     *git.Attributes // nil when the repository's conversion rules could not be read
 	objects   *git.Objects    // opened with the first end-of-line candidate
@@ -66,11 +67,11 @@ type verifier struct {
 }
 
 // verifier returns the verifier of the repository whose work tree is root-relative path.
-func (w *walker) verifier(path string, repo *git.Repo) *verifier {
+func (w *walker) verifier(path string, repo *git.Repo, index *git.Index) *verifier {
 	if v := w.verifiers[path]; v != nil {
 		return v
 	}
-	v := &verifier{w: w, repo: repo, path: path}
+	v := &verifier{w: w, repo: repo, index: index, path: path}
 	w.verifiers[path] = v
 	return v
 }
@@ -83,7 +84,7 @@ func (v *verifier) add(ctx context.Context, rel, oid string, j hashJob) {
 		conv, err := v.repo.Conversion(ctx)
 		if err == nil {
 			v.conv = conv
-			v.attrs, err = v.repo.Attributes(convertAttrs)
+			v.attrs, err = v.repo.Attributes(convertAttrs, git.AttributeOptions{Index: v.index})
 		}
 		if err != nil {
 			v.attrs = nil

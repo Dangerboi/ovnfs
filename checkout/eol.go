@@ -146,7 +146,7 @@ func newEOLConverter(ctx context.Context, view *base.Base, paths []string) (*eol
 			c.indexAt = rr.Index
 		}
 	}
-	attrs, err := repo.Attributes([]string{"text", "eol", "crlf", "filter", "ident", "working-tree-encoding"})
+	attrs, err := repo.Attributes([]string{"text", "eol", "crlf", "filter", "ident", "working-tree-encoding"}, git.AttributeOptions{})
 	if err != nil {
 		return nil, err
 	}

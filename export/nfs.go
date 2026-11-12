@@ -1,7 +1,6 @@
 package export
 
 import (
-	"strings"
 	"time"
 
 	"github.com/stencil-hq/ovnfs/nfs"
@@ -19,8 +18,7 @@ func (e *Export) NFS() nfs.Backend { return &nfsFS{e.protocolFS()} }
 
 // Path resolves a live node id, which NFS file handles carry, to its path.
 func (n *nfsFS) Path(id uint64) (string, bool) {
-	parts, ok := n.nodes.path(id)
-	return strings.Join(parts, "/"), ok
+	return n.nodes.path(id)
 }
 
 // Rename advances a regular file's mtime to stand in for the ctime change

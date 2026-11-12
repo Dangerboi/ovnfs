@@ -60,7 +60,7 @@ func gitCheckAttr(t *testing.T, r *Repo, names, paths []string) [][]string {
 func compareAttr(t *testing.T, r *Repo, names, paths []string) {
 	t.Helper()
 	want := gitCheckAttr(t, r, names, paths)
-	a, err := r.Attributes(names)
+	a, err := r.Attributes(names, AttributeOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,6 +223,61 @@ func TestAttributesIndexFallback(t *testing.T) {
 	compareAttr(t, r, []string{"staged", "foo", "bar", "baz"}, paths)
 }
 
+// TestAttributesIndexSnapshot checks that a captured index backs the fallback,
+// not the live index, and still lists .gitattributes entries ordinary Entries
+// omit (skip-worktree).
+func TestAttributesIndexSnapshot(t *testing.T) {
+	r := attrRepo(t)
+	stage := func(dir, content string) {
+		name := filepath.Join(r.Top, dir, ".gitattributes")
+		testWrite(t, name, content)
+		testGit(t, r.Top, "add", "--", filepath.ToSlash(filepath.Join(dir, ".gitattributes")))
+		if err := os.Remove(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stage("sparse", "*.a snap\n")
+	stage("plain", "*.a snap\n")
+	testGit(t, r.Top, "update-index", "--skip-worktree", "sparse/.gitattributes")
+	snap, err := r.ReadIndex(r.IndexPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range snap.Entries {
+		if e.Path == "sparse/.gitattributes" {
+			t.Fatal("skip-worktree entry listed in Entries")
+		}
+	}
+	// The live index moves on after the snapshot.
+	stage("plain", "*.a live\n")
+	stage("late", "*.a live\n")
+
+	check := func(opts AttributeOptions, p string) string {
+		t.Helper()
+		a, err := r.Attributes([]string{"snap", "live"}, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := a.Check(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got[0] + "/" + got[1]
+	}
+	for p, want := range map[string]string{
+		"sparse/x.a": "set/unspecified",
+		"plain/x.a":  "set/unspecified",
+		"late/x.a":   "unspecified/unspecified",
+	} {
+		if got := check(AttributeOptions{Index: &snap}, p); got != want {
+			t.Errorf("snapshot %s = %s, want %s", p, got, want)
+		}
+	}
+	if got := check(AttributeOptions{}, "late/x.a"); got != "unspecified/set" {
+		t.Errorf("live late/x.a = %s, want unspecified/set", got)
+	}
+}
+
 func TestAttributesConcurrentChecks(t *testing.T) {
 	r := attrRepo(t)
 	var paths []string
@@ -234,7 +289,7 @@ func TestAttributesConcurrentChecks(t *testing.T) {
 	testWrite(t, filepath.Join(r.Top, ".gitattributes"), "*.txt text\n*.h text foo\n")
 	names := []string{"text", "foo"}
 	want := gitCheckAttr(t, r, names, paths)
-	a, err := r.Attributes(names)
+	a, err := r.Attributes(names, AttributeOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,14 +310,14 @@ func TestAttributesConcurrentChecks(t *testing.T) {
 func TestAttributesRejectedQueries(t *testing.T) {
 	r := attrRepo(t)
 	for _, names := range [][]string{nil, {"a+b"}, {"-text"}, {"[attr]x"}} {
-		if _, err := r.Attributes(names); err == nil {
+		if _, err := r.Attributes(names, AttributeOptions{}); err == nil {
 			t.Errorf("Attributes(%q) succeeded", names)
 		}
 	}
-	if _, err := r.Attributes([]string{"builtin_objectmode"}); !errors.Is(err, ErrAttrUnsupported) {
+	if _, err := r.Attributes([]string{"builtin_objectmode"}, AttributeOptions{}); !errors.Is(err, ErrAttrUnsupported) {
 		t.Errorf("builtin_objectmode: %v", err)
 	}
-	a, err := r.Attributes([]string{"text"})
+	a, err := r.Attributes([]string{"text"}, AttributeOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +350,7 @@ func TestAttributesTreeSource(t *testing.T) {
 		t.Setenv("GIT_ATTR_SOURCE", "HEAD")
 		compareAttr(t, r, names, paths)
 		t.Setenv("GIT_ATTR_SOURCE", "no-such-ref")
-		if _, err := r.Attributes(names); err == nil {
+		if _, err := r.Attributes(names, AttributeOptions{}); err == nil {
 			t.Error("a GIT_ATTR_SOURCE naming no tree was accepted")
 		}
 	})

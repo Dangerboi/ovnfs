@@ -96,7 +96,20 @@ func (c *conn) serve() {
 	defer c.nc.Close()
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	sem := make(chan struct{}, max(c.srv.Concurrency, 1))
+	limit := max(c.srv.Concurrency, 1)
+	// jobs is unbuffered: a send succeeds only when a worker is idle, so at
+	// most limit calls are in flight. Workers start lazily up to limit and
+	// exit when jobs closes, after finishing every accepted call.
+	jobs := make(chan *[]byte)
+	defer close(jobs)
+	workers := 0
+	work := func(first *[]byte) {
+		defer wg.Done()
+		for req := first; req != nil; req = <-jobs {
+			c.answer(*req)
+			putBuf(req)
+		}
+	}
 	r := bufio.NewReaderSize(c.nc, 64<<10)
 	for {
 		req := bufs.Get().(*[]byte)
@@ -114,12 +127,17 @@ func (c *conn) serve() {
 			putBuf(req)
 			continue
 		}
-		sem <- struct{}{}
-		wg.Go(func() {
-			c.answer(rec)
-			putBuf(req)
-			<-sem
-		})
+		select {
+		case jobs <- req:
+		default:
+			if workers < limit {
+				workers++
+				wg.Add(1)
+				go work(req)
+			} else {
+				jobs <- req
+			}
+		}
 	}
 }
 

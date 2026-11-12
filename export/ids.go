@@ -1,8 +1,6 @@
 package export
 
 import (
-	"strings"
-
 	"github.com/stencil-hq/ovnfs/overlay"
 	"github.com/stencil-hq/ovnfs/smb"
 )
@@ -26,8 +24,7 @@ func (n *Nodes) ID(p string) uint64 { return n.nodes.id(overlay.Clean(p)) }
 // Path resolves a live node id to its current export-relative path, or false
 // once the id was never issued, removed, or replaced by a rename.
 func (n *Nodes) Path(id uint64) (string, bool) {
-	parts, ok := n.nodes.path(id)
-	return strings.Join(parts, "/"), ok
+	return n.nodes.path(id)
 }
 
 // HoldFileID retains an identity while a frontend has live file state.

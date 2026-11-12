@@ -200,9 +200,13 @@ A capture of an unchanged file reads no content and no repository data: the
 folder's stat cache (`sources/`) holds each file's blob id, including tracked
 files a capture found to hold their index blob unconverted, whose blob the
 repository keeps while its index still names it. Attribute and blob-size
-checks run only for a tracked file the cache does not know. The walk
-classifies a directory's entries, then lists the
-source directories among them on eight readers while it descends; directories
+checks run only for a tracked file the cache does not know. Attribute fallback
+reuses the capture's decoded index, including stage-zero `.gitattributes`
+entries excluded from its checked-out files. Narrow packed-reference lookups
+retain only matching refs while still validating the entire file.
+
+The walk classifies a directory's entries, then lists the source directories
+among them on four readers on macOS and Windows, eight on Linux. Directories
 it leaves alone are never listed, since listing one can update its access time,
 which the watcher reports as an edit.
 
@@ -217,6 +221,32 @@ move onto the new capture, whose `git-template/` is written after the creates
 waiting on it have their checkouts; a change below `.git` discards them.
 Prepared checkouts are in no state: a restart removes them, and an unused
 capture is released after 15 minutes.
+
+## Native filesystem reads
+
+Capture and live checkout listings share `internal/search/fsys` with native
+search. Search keeps compact names, types and optional size/mtime records;
+`fsys.ReadDir` supplies complete metadata and per-entry errors without adding
+full stat records to compact listings.
+
+Both modes use the same native enumeration loops and reusable buffers:
+Darwin's EOF-aware `getdirentries64` and `getattrlistbulk`, Linux's
+`getdents64` and descriptor-relative metadata, and Windows'
+`NtQueryDirectoryFile`. Unix children open with `openat`; Windows children
+use handle-relative `NtCreateFile`. Linux requests `O_NOATIME` until denied,
+uses minimal `statx` masks for search, and falls back to `fstatat` when
+`statx` is unavailable. Freshness checks do not use `AT_STATX_DONT_SYNC`.
+
+Darwin bulk metadata is checked against native stat fields; entries it cannot
+describe exactly use descriptor-relative stat. Windows reparse entries use
+`Lstat`, and capture retains its inode pass and fresh directory timestamps.
+An entry's metadata error remains attached to that entry, so capture can
+report it without discarding the rest of the directory.
+
+Native names reject embedded NULs. Windows preserves WTF-8 names and Win32
+normalization before direct NT path queries. Positional reads are bounded per
+syscall, timestamps saturate instead of wrapping, and symlink-cycle checks
+identify an already-open parent by its handle.
 
 ## Memory tiers
 
@@ -334,7 +364,9 @@ never reuses their hashes or changes the identity log format.
 
 The NFS server separately keeps at most 1024 listing snapshots for READDIR
 cookies; eviction from the identity cache does not change those cookies or
-verifiers. Its kept writable files expire when idle. NFSv4 state follows client
+verifiers. Each connection reuses a bounded pool of request workers, started
+on demand; disconnect drains accepted calls before releasing the connection.
+Its kept writable files expire when idle. NFSv4 state follows client
 leases and explicit close/unlock/delegation return. The overlay's `pathIDs` and
 `aliases` describe current upper files, are removed with those files, and do
 not accumulate paths from read-only walks. These limits do not bound the

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -113,6 +114,11 @@ type IndexEntry struct {
 type Index struct {
 	Entries  []IndexEntry
 	Modified time.Time // the index file's mtime; entries modified at or after it are racily clean
+
+	// attrFiles lists every stage-0 regular .gitattributes blob, including
+	// entries Entries omits (skip-worktree, intent-to-add): the work tree
+	// fallback of Attributes.
+	attrFiles map[string]object.ID
 }
 
 // IndexPath is the work tree's live index file.
@@ -129,8 +135,11 @@ func (r *Repo) ReadIndex(name string) (Index, error) {
 	if err != nil {
 		return Index{}, fmt.Errorf("read %s: %w", name, err)
 	}
-	out := Index{Entries: make([]IndexEntry, 0, len(idx.Entries)), Modified: idx.ModTime}
+	out := Index{Entries: make([]IndexEntry, 0, len(idx.Entries)), Modified: idx.ModTime, attrFiles: map[string]object.ID{}}
 	for _, e := range idx.Entries {
+		if isIndexedAttrFile(e) {
+			out.attrFiles[e.Path] = e.ID
+		}
 		if e.Stage != 0 || e.SkipWorktree || e.IntentToAdd {
 			continue
 		}
@@ -145,6 +154,11 @@ func (r *Repo) ReadIndex(name string) (Index, error) {
 		})
 	}
 	return out, nil
+}
+
+// isIndexedAttrFile reports a stage-0 .gitattributes entry that holds a regular file's blob.
+func isIndexedAttrFile(e index.Entry) bool {
+	return e.Stage == 0 && path.Base(e.Path) == ".gitattributes" && e.Mode != object.ModeSymlink && e.Mode.Kind() == object.Blob
 }
 
 // Head returns the commit HEAD points at, or "" on an unborn branch.

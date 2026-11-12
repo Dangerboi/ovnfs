@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -775,11 +776,15 @@ func TestV3FSInfoStatPathconf(t *testing.T) {
 type slowFS struct {
 	*testFS
 	release chan struct{}
+	entered chan struct{} // if set, receives one value per blocked Lstat
 }
 
 // Lstat waits for the release of "slow".
 func (f *slowFS) Lstat(p string) (os.FileInfo, error) {
 	if p == "slow" {
+		if f.entered != nil {
+			f.entered <- struct{}{}
+		}
 		<-f.release
 	}
 	return f.testFS.Lstat(p)
@@ -815,6 +820,92 @@ func (c *rpcClient) replyXID(timeout time.Duration) (uint32, bool) {
 		c.t.Fatal(err)
 	}
 	return binary.BigEndian.Uint32(rec), true
+}
+
+// TestV3ConcurrencyLimit checks that with Concurrency 2 and
+// two blocked calls, a third call is held back (the bound) and answered once
+// one finishes.
+func TestV3ConcurrencyLimit(t *testing.T) {
+	fs := &slowFS{testFS: newTestFS(t), release: make(chan struct{})}
+	fs.write(t, "slow", "")
+	var once sync.Once
+	release := func() { once.Do(func() { close(fs.release) }) }
+	t.Cleanup(release)
+	addr := startServer(t, &Server{FS: fs, Concurrency: 2})
+	slow := fs.FileID("slow")
+
+	c := dial(t, addr)
+	c.send(1, v3GetAttr, func(e *encoder) { e.fh(slow) })
+	c.send(2, v3GetAttr, func(e *encoder) { e.fh(slow) })
+	c.send(3, v3GetAttr, func(e *encoder) { e.fh(1) })
+	if xid, ok := c.replyXID(200 * time.Millisecond); ok {
+		t.Fatalf("reply %d while both workers block; want the third call held back", xid)
+	}
+	release()
+	seen := map[uint32]bool{}
+	for range 3 {
+		xid, ok := c.replyXID(5 * time.Second)
+		if !ok {
+			t.Fatalf("missing replies after release; got %v", seen)
+		}
+		seen[xid] = true
+	}
+	if !seen[1] || !seen[2] || !seen[3] {
+		t.Fatalf("replies %v, want xids 1, 2, 3", seen)
+	}
+
+}
+
+// TestV3ServeDrainsAcceptedCallsOnDisconnect runs conn.serve directly: after
+// the client disconnects with calls blocked in the backend, serve must not
+// return until those calls finish, and must return once they do.
+func TestV3ServeDrainsAcceptedCallsOnDisconnect(t *testing.T) {
+	fs := &slowFS{testFS: newTestFS(t), release: make(chan struct{}), entered: make(chan struct{}, 2)}
+	fs.write(t, "slow", "")
+	var once sync.Once
+	release := func() { once.Do(func() { close(fs.release) }) }
+	t.Cleanup(release)
+	srv := &Server{FS: fs, Concurrency: 2}
+	t.Cleanup(func() { closeKept(srv) })
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	c := dial(t, l.Addr().String())
+	sc, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	returned := make(chan struct{})
+	go func() {
+		(&conn{srv: srv, nc: sc}).serve()
+		close(returned)
+	}()
+
+	slow := fs.FileID("slow")
+	c.send(1, v3GetAttr, func(e *encoder) { e.fh(slow) })
+	c.send(2, v3GetAttr, func(e *encoder) { e.fh(slow) })
+	for range 2 {
+		select {
+		case <-fs.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("calls never reached the backend")
+		}
+	}
+	c.nc.Close() // serve sees EOF with both calls accepted and blocked
+	select {
+	case <-returned:
+		t.Fatal("serve returned while accepted calls were still blocked")
+	case <-time.After(200 * time.Millisecond):
+	}
+	release()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return after blocked calls were released")
+	}
 }
 
 // TestV3ConcurrentCalls checks that with Concurrency above one, a slow call

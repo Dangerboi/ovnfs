@@ -245,8 +245,8 @@ func TestDegradedConcurrentRetain(t *testing.T) {
 				if byPath {
 					found <- nt.id("co/file") == id
 				} else {
-					parts, ok := nt.path(id)
-					found <- ok && len(parts) == 2 && parts[1] == "file"
+					p, ok := nt.path(id)
+					found <- ok && p == "co/file"
 				}
 			}()
 			select {
@@ -471,7 +471,7 @@ func TestPreparedDestinationRemainsResident(t *testing.T) {
 			nt.mu.Unlock()
 			nt.rename("co/src", "co/dst/moved")
 			release()
-			if reads != 0 || nt.byID[old] == nil || nt.nodePath(nt.byID[old]) != "co/dst/moved" {
+			if reads != 0 || nt.byID[old] == nil || nt.byID[old].fullPath() != "co/dst/moved" {
 				t.Fatal("committed move needed index recovery or lost its identity")
 			}
 			if err := nt.close(); (err != nil) != fatal {

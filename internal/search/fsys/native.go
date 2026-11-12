@@ -1,14 +1,22 @@
 package fsys
 
 import (
+	"io/fs"
+	"math"
+	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
+	"syscall"
 )
 
 // Native is the host filesystem. Directory handles are real descriptors
 // (Windows: HANDLEs) and every operation is a direct syscall; see the
 // native_*.go files for the per-platform fast paths.
-var Native FS = &nativeFS{}
+var Native FS = native
+
+var native = &nativeFS{}
 
 type nativeFS struct {
 	stable sync.Map // device → bool, for StableStamps
@@ -30,12 +38,87 @@ type session struct {
 	buf   []byte   // bulk listing syscall buffer
 	cname []byte   // NUL-terminated name for *at syscalls
 	wname []uint16 // Windows: UTF-16 name for NtCreateFile
+
+	// Metadata listing ([ReadDir]): the directory being read, for the paths
+	// in per-entry errors, and the entries collected so far. ReadDir hands
+	// the entries to its caller, so the session never reuses them.
+	dir     string
+	entries []os.DirEntry
 }
 
-// cstr returns name NUL-terminated in s.cname.
-func (s *session) cstr(name string) []byte {
+// readDirSessions pools the sessions [ReadDir] borrows, keeping their listing
+// buffers across calls.
+var readDirSessions = sync.Pool{New: func() any { return &session{fs: native} }}
+
+// ReadDir lists host directory path sorted by name with the native backend's
+// own listing, without following symlinks. Every entry is returned, special
+// files included, and its Info is complete [os.Lstat] data (the same Mode,
+// Size, ModTime and Sys). An entry that cannot be described, for instance
+// because it was removed after being listed, returns that error from Info
+// while the rest list normally; only a failure of the directory itself fails
+// the call, with the error [os.ReadDir] gives. Names are as the host reports
+// them, so on Windows they are UTF-8 conversions of the UTF-16 names.
+//
+// This is native host I/O: it takes a path, bypasses [FS], and returns
+// entries that own all their memory.
+func ReadDir(path string) ([]os.DirEntry, error) {
+	s := readDirSessions.Get().(*session)
+	entries, err := s.readDir(path)
+	s.dir, s.entries = "", nil
+	readDirSessions.Put(s)
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	return entries, nil
+}
+
+// failedEntry is a listed entry whose metadata could not be read: its
+// listing type is known but Info reports why the stat failed.
+type failedEntry struct {
+	name string
+	typ  os.FileMode
+	err  error
+}
+
+func (e failedEntry) Name() string               { return e.name }
+func (e failedEntry) IsDir() bool                { return e.typ.IsDir() }
+func (e failedEntry) Type() fs.FileMode          { return e.typ }
+func (e failedEntry) Info() (fs.FileInfo, error) { return nil, e.err }
+
+// cstr returns name NUL-terminated in s.cname. A name with an embedded NUL
+// would silently name a shorter path to the kernel, so it is rejected with
+// EINVAL before any syscall.
+func (s *session) cstr(name string) ([]byte, error) {
+	if strings.IndexByte(name, 0) >= 0 {
+		return nil, syscall.EINVAL
+	}
 	s.cname = append(append(s.cname[:0], name...), 0)
-	return s.cname
+	return s.cname, nil
+}
+
+// nanos converts a seconds+nanoseconds timestamp to Unix nanoseconds with
+// saturating arithmetic: sec*1e9 saturates first, then nsec is added
+// saturating, so an overflowed negative sec still takes a positive nsec.
+func nanos(sec, nsec int64) int64 {
+	const billion = 1_000_000_000
+	var ns int64
+	switch {
+	case sec > math.MaxInt64/billion:
+		ns = math.MaxInt64
+	case sec < math.MinInt64/billion:
+		ns = math.MinInt64
+	default:
+		ns = sec * billion
+	}
+	sum := ns + nsec
+	if nsec > 0 && sum < ns {
+		return math.MaxInt64
+	}
+	if nsec < 0 && sum > ns {
+		return math.MinInt64
+	}
+	return sum
 }
 
 func wrap(h handle) Handle { return Handle{h: uintptr(h), ok: true} }

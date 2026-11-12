@@ -17,17 +17,28 @@ const (
 	fileOpenFlags = unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NONBLOCK
 
 	pathSep = '/'
+	// maxRead bounds one pread: larger requests fail with EINVAL on some
+	// kernels and are truncated by others at this size.
+	maxRead = 0x7ffff000
 	// memoStableByDev: stamps carry real device numbers, so the
 	// per-filesystem StableStamps verdict can be memoized per device.
 	memoStableByDev = true
 )
 
 func (s *session) openDir(path string) (handle, error) {
-	return openat(unix.AT_FDCWD, s.cstr(path), dirOpenFlags)
+	c, err := s.cstr(path)
+	if err != nil {
+		return 0, err
+	}
+	return openat(unix.AT_FDCWD, c, dirOpenFlags)
 }
 
 func (s *session) openChild(parent handle, name string) (handle, error) {
-	return openat(parent, s.cstr(name), dirOpenFlags|unix.O_NOFOLLOW)
+	c, err := s.cstr(name)
+	if err != nil {
+		return 0, err
+	}
+	return openat(parent, c, dirOpenFlags|unix.O_NOFOLLOW)
 }
 
 func closeHandle(h handle) { unix.Close(h) }
@@ -35,6 +46,13 @@ func closeHandle(h handle) { unix.Close(h) }
 func (s *session) Identify(path string) (ID, error) {
 	info, err := s.Stat(path, true)
 	return ID{Dev: info.Stamp.Dev, Ino: info.Stamp.Ino}, err
+}
+
+// IdentifyDir identifies the open directory h from its descriptor, without
+// resolving a path.
+func (s *session) IdentifyDir(h Handle) (ID, error) {
+	st, _, _, err := statHandle(h.native())
+	return ID{Dev: st.Dev, Ino: st.Ino}, err
 }
 
 func typeFromDT(t uint8) Type {
@@ -66,7 +84,11 @@ func (s *session) OpenFile(dir Handle, name string) (Handle, FileInfo, error) {
 	if dir.ok {
 		at = int(dir.h)
 	}
-	fd, err := openat(at, s.cstr(name), fileOpenFlags)
+	c, err := s.cstr(name)
+	if err != nil {
+		return Handle{}, FileInfo{}, err
+	}
+	fd, err := openat(at, c, fileOpenFlags)
 	if err != nil {
 		return Handle{}, FileInfo{}, err
 	}
@@ -85,7 +107,7 @@ func (s *session) Read(h Handle, buf []byte, limit int64) ([]byte, error) {
 	fd := int(h.h)
 	return readInto(buf, h.size, limit, func(p []byte, off int64) (int, error) {
 		for {
-			n, err := unix.Pread(fd, p, off)
+			n, err := unix.Pread(fd, p[:min(len(p), maxRead)], off)
 			if err != unix.EINTR {
 				return n, err
 			}

@@ -3,12 +3,14 @@ package source
 import (
 	"os"
 	"path/filepath"
-	"slices"
-	"strings"
 	"unsafe"
 
+	"github.com/stencil-hq/ovnfs/internal/search/fsys"
 	"golang.org/x/sys/windows"
 )
+
+// readers is how many directories are read ahead at once.
+const readers = 4
 
 // readDir lists host directory dir sorted by name, enumerating it once more first
 // for its entries' NTFS file ids, which os.FileInfo hides. Ids are read before the
@@ -24,9 +26,7 @@ func readDir(dir string) ([]os.DirEntry, func(os.FileInfo) fileKey, error) {
 	}
 	defer f.Close()
 	ids := fileIDs(windows.Handle(f.Fd()))
-	// Go's listing restarts the enumeration on the same handle.
-	entries, err := f.ReadDir(-1)
-	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	entries, err := fsys.ReadDir(dir)
 	for i, e := range entries {
 		if e.IsDir() {
 			entries[i] = freshDir{DirEntry: e, path: filepath.Join(dir, e.Name())}

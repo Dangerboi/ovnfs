@@ -5,7 +5,11 @@ package fsys
 import (
 	"bytes"
 	"math"
+	"os"
+	"path/filepath"
 	"sync/atomic"
+	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -107,14 +111,22 @@ func (s *session) list(h handle, detail Detail, _ uint32) error {
 			if *(*uint64)(unsafe.Pointer(&rec[direntIno])) == 0 {
 				continue
 			}
-			name := rec[direntName:reclen]
-			if i := bytes.IndexByte(name, 0); i >= 0 {
-				name = name[:i]
+			// The name must be NUL-terminated inside its record: the
+			// terminator lets statx/fstatat read it in place.
+			i := bytes.IndexByte(rec[direntName:reclen], 0)
+			if i < 0 {
+				return unix.EIO
 			}
-			if len(name) == 0 || isDotOrDotDot(name) {
+			cname := rec[direntName : direntName+i+1 : direntName+i+1]
+			name := cname[:i]
+			if i == 0 || isDotOrDotDot(name) {
 				continue
 			}
 			dt := rec[direntType]
+			if detail == metadataDetail {
+				s.entries = append(s.entries, s.metadataEntry(h, cname, dt))
+				continue
+			}
 			typ := typeFromDT(dt)
 			if typ == 0 && dt != unix.DT_UNKNOWN {
 				continue
@@ -122,7 +134,7 @@ func (s *session) list(h handle, detail Detail, _ uint32) error {
 			size, mtime := int64(-1), int64(0)
 			if detail == Full || typ == 0 {
 				var ok bool
-				if typ, size, mtime, ok = s.stat(h, name); !ok {
+				if typ, size, mtime, ok = s.stat(h, cname); !ok {
 					continue
 				}
 			}
@@ -150,7 +162,11 @@ func (s *session) Stat(path string, follow bool) (FileInfo, error) {
 	if follow {
 		flags = 0
 	}
-	st, typ, size, err := statStamp(unix.AT_FDCWD, s.cstr(path), flags)
+	cpath, err := s.cstr(path)
+	if err != nil {
+		return FileInfo{}, err
+	}
+	st, typ, size, err := statStamp(unix.AT_FDCWD, cpath, flags)
 	return FileInfo{Type: typ, Size: size, Stamp: st}, err
 }
 
@@ -169,8 +185,8 @@ func statStamp(dir int, cname []byte, flags int) (Stamp, Type, int64, error) {
 				return Stamp{
 					Dev:   unix.Mkdev(stx.Dev_major, stx.Dev_minor),
 					Ino:   stx.Ino,
-					Mtime: stx.Mtime.Sec*1e9 + int64(stx.Mtime.Nsec),
-					Ctime: stx.Ctime.Sec*1e9 + int64(stx.Ctime.Nsec),
+					Mtime: nanos(stx.Mtime.Sec, int64(stx.Mtime.Nsec)),
+					Ctime: nanos(stx.Ctime.Sec, int64(stx.Ctime.Nsec)),
 				}, typeFromMode(uint32(stx.Mode)), int64(stx.Size), nil
 			case unix.EINTR:
 				continue
@@ -184,14 +200,32 @@ func statStamp(dir int, cname []byte, flags int) (Stamp, Type, int64, error) {
 			break
 		}
 	}
-	var st unix.Stat_t
+	var st syscall.Stat_t
 	var err error
 	if flags&unix.AT_EMPTY_PATH != 0 {
-		err = unix.Fstat(dir, &st)
+		for {
+			if err = syscall.Fstat(dir, &st); err != syscall.EINTR {
+				break
+			}
+		}
 	} else {
-		err = unix.Fstatat(dir, string(cname[:len(cname)-1]), &st, flags)
+		err = fstatat(dir, cname, &st, flags)
 	}
-	return Stamp{Dev: st.Dev, Ino: st.Ino, Mtime: st.Mtim.Nano(), Ctime: st.Ctim.Nano()}, typeFromMode(st.Mode), st.Size, err
+	return Stamp{Dev: uint64(st.Dev), Ino: uint64(st.Ino), Mtime: nanos(int64(st.Mtim.Sec), int64(st.Mtim.Nsec)), Ctime: nanos(int64(st.Ctim.Sec), int64(st.Ctim.Nsec))}, typeFromMode(uint32(st.Mode)), int64(st.Size), err
+}
+
+// fstatat is unix.Fstatat on a NUL-terminated name without converting it to
+// a string, retrying EINTR.
+func fstatat(dir int, cname []byte, st *syscall.Stat_t, flags int) error {
+	for {
+		_, _, e := unix.Syscall6(sysFstatat, uintptr(dir), uintptr(unsafe.Pointer(&cname[0])), uintptr(unsafe.Pointer(st)), uintptr(flags), 0, 0)
+		if e != unix.EINTR {
+			if e != 0 {
+				return e
+			}
+			return nil
+		}
+	}
 }
 
 // fineTimestamps admits local filesystems that keep sub-second timestamps
@@ -213,21 +247,21 @@ func fineTimestamps(h handle) bool {
 
 const zfsSuperMagic = 0x2fc12fc1
 
-// stat resolves name relative to dir without following symlinks.
-func (s *session) stat(dir handle, name []byte) (typ Type, size, mtime int64, ok bool) {
+// stat resolves the NUL-terminated cname relative to dir without following
+// symlinks.
+func (s *session) stat(dir handle, cname []byte) (typ Type, size, mtime int64, ok bool) {
 	size = -1
 	if !noStatx.Load() {
-		s.cname = append(append(s.cname[:0], name...), 0)
 		var stx unix.Statx_t
 		for {
-			_, _, e := unix.Syscall6(unix.SYS_STATX, uintptr(dir), uintptr(unsafe.Pointer(&s.cname[0])), statxFlags, statxMask, uintptr(unsafe.Pointer(&stx)), 0)
+			_, _, e := unix.Syscall6(unix.SYS_STATX, uintptr(dir), uintptr(unsafe.Pointer(&cname[0])), statxFlags, statxMask, uintptr(unsafe.Pointer(&stx)), 0)
 			switch e {
 			case 0:
 				typ = typeFromMode(uint32(stx.Mode))
 				if typ == File {
 					size = int64(stx.Size)
 				}
-				return typ, size, stx.Mtime.Sec*1e9 + int64(stx.Mtime.Nsec), typ != 0
+				return typ, size, nanos(stx.Mtime.Sec, int64(stx.Mtime.Nsec)), typ != 0
 			case unix.EINTR:
 				continue
 			case unix.ENOSYS, unix.EPERM:
@@ -240,13 +274,64 @@ func (s *session) stat(dir handle, name []byte) (typ Type, size, mtime int64, ok
 			break
 		}
 	}
-	var st unix.Stat_t
-	if unix.Fstatat(dir, string(name), &st, unix.AT_SYMLINK_NOFOLLOW) != nil {
+	var st syscall.Stat_t
+	if fstatat(dir, cname, &st, unix.AT_SYMLINK_NOFOLLOW) != nil {
 		return 0, -1, 0, false
 	}
-	typ = typeFromMode(st.Mode)
+	typ = typeFromMode(uint32(st.Mode))
 	if typ == File {
-		size = st.Size
+		size = int64(st.Size)
 	}
-	return typ, size, st.Mtim.Sec*1e9 + st.Mtim.Nsec, typ != 0
+	return typ, size, nanos(int64(st.Mtim.Sec), int64(st.Mtim.Nsec)), typ != 0
+}
+
+// readDir lists the directory at path with complete lstat-compatible
+// metadata for every entry, special files included, through the same open,
+// getdents64 loop, and buffer as search listings. Entries whose lstat fails
+// are reported as failedEntry values carrying an lstat *os.PathError (path built only on failure) instead of failing the listing.
+func (s *session) readDir(path string) ([]os.DirEntry, error) {
+	s.dir = path
+	h, err := s.openDir(path)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	defer closeHandle(h)
+	s.entries = nil
+	if err := s.list(h, metadataDetail, 0); err != nil {
+		s.entries = nil
+		return nil, &os.PathError{Op: "readdirent", Path: path, Err: err}
+	}
+	return s.entries, nil
+}
+
+// metadataEntry lstats the NUL-terminated cname relative to dir into a
+// complete nativeInfo, or reports the failure with the type d_type gave.
+func (s *session) metadataEntry(dir handle, cname []byte, dt byte) os.DirEntry {
+	name := string(cname[:len(cname)-1])
+	info := &nativeInfo{name: name}
+	if err := fstatat(dir, cname, &info.st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return failedEntry{name: name, typ: dtMode(dt), err: &os.PathError{Op: "lstat", Path: filepath.Join(s.dir, name), Err: err}}
+	}
+	info.mode = modeFromStat(uint32(info.st.Mode))
+	info.mod = time.Unix(int64(info.st.Mtim.Sec), int64(info.st.Mtim.Nsec))
+	return info
+}
+
+// dtMode maps a d_type to the Go file type bits; DT_UNKNOWN maps to 0.
+func dtMode(dt byte) os.FileMode {
+	switch dt {
+	case unix.DT_DIR:
+		return os.ModeDir
+	case unix.DT_LNK:
+		return os.ModeSymlink
+	case unix.DT_FIFO:
+		return os.ModeNamedPipe
+	case unix.DT_SOCK:
+		return os.ModeSocket
+	case unix.DT_CHR:
+		return os.ModeDevice | os.ModeCharDevice
+	case unix.DT_BLK:
+		return os.ModeDevice
+	}
+	return 0
 }

@@ -489,7 +489,7 @@ func (w *walker) resolve(ctx context.Context, j hashJob) {
 	}
 	if tracked && indexClean(entry, j.info, j.key, j.mode, dom.indexAt.Modified) {
 		// Tracked and unchanged: the user's repository holds the content unless git converts it.
-		w.verifier(dom.path, dom.repo).add(ctx, rel, entry.OID, j)
+		w.verifier(dom.path, dom.repo, &dom.indexAt).add(ctx, rel, entry.OID, j)
 		return
 	}
 	w.jobs <- j

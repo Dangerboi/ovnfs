@@ -13,3 +13,6 @@ func statKey(info os.FileInfo) fileKey {
 	}
 	return fileKey{ino: s.Ino, ctime: s.Ctim.Nano()}
 }
+
+// readers is how many directories are read ahead at once: eight workers walked faster and steadier than sixteen on a 16-vCPU VM (see search/fsys).
+const readers = 8

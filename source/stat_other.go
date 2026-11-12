@@ -10,3 +10,6 @@ func readDir(dir string) ([]os.DirEntry, func(os.FileInfo) fileKey, error) {
 	entries, err := os.ReadDir(dir)
 	return entries, func(os.FileInfo) fileKey { return fileKey{} }, err
 }
+
+// readers is how many directories are read ahead at once.
+const readers = 4

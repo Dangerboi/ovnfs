@@ -291,16 +291,23 @@ type Attributes struct {
 	// attr.tree names, by slash path; nil reads the work tree.
 	fromTree map[string][]byte
 	// indexed lists the index's stage-0 .gitattributes blobs, the work tree's
-	// fallback, loaded once on first need.
+	// fallback: a captured snapshot's, else the live index loaded once on first need.
 	indexOnce sync.Once
 	indexed   map[string]object.ID
 	indexErr  error
 }
 
+// AttributeOptions tunes Repo.Attributes.
+type AttributeOptions struct {
+	// Index is the index snapshot whose .gitattributes blobs back unusable
+	// work-tree files; nil reads the repository's live index on first need.
+	Index *Index
+}
+
 // Attributes prepares queries for names with r's attribute files and
 // core.ignorecase. The system file is /etc/gitattributes (git's own path depends
 // on its install prefix), skipped when GIT_ATTR_NOSYSTEM is true.
-func (r *Repo) Attributes(names []string) (*Attributes, error) {
+func (r *Repo) Attributes(names []string, opts AttributeOptions) (*Attributes, error) {
 	if len(names) == 0 {
 		return nil, errors.New("no attribute specified")
 	}
@@ -345,6 +352,10 @@ func (r *Repo) Attributes(names []string) (*Attributes, error) {
 			{name: "diff", kind: attrUnset}, {name: "merge", kind: attrUnset}, {name: "text", kind: attrUnset},
 		}},
 		dirs: make(map[string]*attrDir),
+	}
+	if opts.Index != nil {
+		a.indexed = opts.Index.attrFiles
+		a.indexOnce.Do(func() {})
 	}
 	if err := a.useTreeSource(cfg); err != nil {
 		return nil, err
@@ -479,7 +490,7 @@ func (a *Attributes) indexAttributes(name string) ([]byte, error) {
 		}
 		a.indexed = map[string]object.ID{}
 		for _, e := range idx.Entries {
-			if e.Stage == 0 && path.Base(e.Path) == ".gitattributes" && e.Mode != object.ModeSymlink && e.Mode.Kind() == object.Blob {
+			if isIndexedAttrFile(e) {
 				a.indexed[e.Path] = e.ID
 			}
 		}

@@ -136,6 +136,8 @@ func (s *overlaySession) StatDir(h Handle) (Stamp, error) {
 	return info.Stamp, err
 }
 
+func (*overlaySession) IdentifyDir(Handle) (ID, error) { return ID{}, errors.ErrUnsupported }
+
 func (*overlaySession) Identify(string) (ID, error) { return ID{}, errors.ErrUnsupported }
 
 // Live cache-class paths can change without changing the overlay's directory stamp.

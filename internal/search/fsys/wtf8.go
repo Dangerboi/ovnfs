@@ -28,11 +28,18 @@ func appendWTF8(dst []byte, src []uint16) []byte {
 
 // appendUTF16 decodes WTF-8 (see [appendWTF8]) to UTF-16, mapping '/' to
 // '\' so multi-component relative names resolve under the NT namespace.
-func appendUTF16(dst []uint16, s string) []uint16 {
+func appendUTF16(dst []uint16, s string) []uint16 { return decodeWTF8(dst, s, true) }
+
+// appendUTF16Raw decodes WTF-8 to UTF-16 without touching separators, for
+// paths handed to Win32, which normalizes them itself except behind the
+// verbatim `\\?\` prefix, where every byte must reach the kernel as spelled.
+func appendUTF16Raw(dst []uint16, s string) []uint16 { return decodeWTF8(dst, s, false) }
+
+func decodeWTF8(dst []uint16, s string, slashes bool) []uint16 {
 	for i := 0; i < len(s); {
 		b := s[i]
 		switch {
-		case b == '/':
+		case b == '/' && slashes:
 			dst = append(dst, '\\')
 			i++
 			continue

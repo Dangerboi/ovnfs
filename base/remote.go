@@ -192,7 +192,7 @@ func (b *Base) Uncached(p string) (Want, bool) {
 	if b.remote == nil {
 		return Want{}, false
 	}
-	p = cleanPath(p)
+	p = overlay.Clean(p)
 	e, ok := b.sources[p]
 	if !ok || !e.mode.IsRegular() {
 		return Want{}, false
@@ -256,7 +256,7 @@ type remoteBottom struct{ b *Base }
 // info describes p from the offer, without fetching anything.
 func (v remoteBottom) info(p string) (os.FileInfo, error) {
 	b := v.b
-	p = cleanPath(p)
+	p = overlay.Clean(p)
 	if e, ok := b.sources[p]; ok {
 		meta := b.capture.Info[p]
 		mtime := meta.Mtime
@@ -276,7 +276,7 @@ func (v remoteBottom) Lstat(p string) (os.FileInfo, error) { return v.info(p) }
 
 // ReadDir lists offered children (and cache roots as empty directories).
 func (v remoteBottom) ReadDir(p string) ([]os.FileInfo, error) {
-	p = cleanPath(p)
+	p = overlay.Clean(p)
 	info, err := v.info(p)
 	if err != nil {
 		return nil, err
@@ -298,7 +298,7 @@ func (v remoteBottom) ReadDir(p string) ([]os.FileInfo, error) {
 // Open fetches a regular file's blob on first use and serves the stored copy,
 // from memory when the store caches it.
 func (v remoteBottom) Open(p string) (overlay.Content, error) {
-	p = cleanPath(p)
+	p = overlay.Clean(p)
 	e, ok := v.b.sources[p]
 	if !ok {
 		return nil, absent(p)
@@ -324,7 +324,7 @@ func (v remoteBottom) Open(p string) (overlay.Content, error) {
 
 // Readlink returns a symlink's target, fetching it if needed.
 func (v remoteBottom) Readlink(p string) (string, error) {
-	p = cleanPath(p)
+	p = overlay.Clean(p)
 	e, ok := v.b.sources[p]
 	if !ok || e.mode&os.ModeSymlink == 0 {
 		return "", &fs.PathError{Op: "readlink", Path: p, Err: syscall.EINVAL}
@@ -335,7 +335,7 @@ func (v remoteBottom) Readlink(p string) (string, error) {
 
 // CopyTo materializes p (a whole directory tree, for renames) at the new path dst.
 func (v remoteBottom) CopyTo(p, dst string) error {
-	p = cleanPath(p)
+	p = overlay.Clean(p)
 	info, err := v.info(p)
 	if err != nil {
 		return err
@@ -371,15 +371,6 @@ func (v remoteBottom) CopyTo(p, dst string) error {
 		}
 	}
 	return setTimes(dst, info.ModTime(), info.Mode()&os.ModeSymlink != 0)
-}
-
-// cleanPath normalizes an overlay path to the base's slash-relative form.
-func cleanPath(p string) string {
-	p = path.Clean("/" + p)
-	if p == "/" {
-		return ""
-	}
-	return p[1:]
 }
 
 // capturedInfo is captured or offered metadata presented as a FileInfo owned by this process's user.

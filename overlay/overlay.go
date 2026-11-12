@@ -342,6 +342,13 @@ func (f *FS) readDir(p string) ([]os.FileInfo, error) {
 	if !info.IsDir() {
 		return nil, &fs.PathError{Op: "readdir", Path: p, Err: syscall.ENOTDIR}
 	}
+	if f.bottomOnly(p) {
+		items, err := f.bottom.ReadDir(p)
+		if err != nil && !missing(err) {
+			return nil, err
+		}
+		return f.sortedVisible(items), nil
+	}
 	seen := make(map[string]bool)
 	out := make([]os.FileInfo, 0)
 	merge := func(l *Layer, upper bool) (bool, error) {
@@ -400,6 +407,49 @@ func (f *FS) readDir(p string) ([]os.FileInfo, error) {
 	}
 	slices.SortFunc(out, func(a, b os.FileInfo) int { return strings.Compare(a.Name(), b.Name()) })
 	return out, nil
+}
+
+// bottomOnly reports whether no upper or layer level has an entry, child or
+// barrier at directory p, so the bottom listing alone is the result.
+func (f *FS) bottomOnly(p string) bool {
+	if f.bottom == nil {
+		return false
+	}
+	for _, l := range f.layers {
+		if !l.untouched(p) {
+			return false
+		}
+	}
+	return f.index == nil || f.index.untouched(p)
+}
+
+// untouched reports whether l has no entry, child or barrier for directory p.
+func (l *Layer) untouched(p string) bool {
+	_, present := l.entries[p]
+	return !present && len(l.children[p]) == 0 && !l.barrier(p)
+}
+
+// sortedVisible returns a fresh, exact-size, name-ordered copy of items without
+// reserved whiteout names. The Bottom contract gives callers no ownership of
+// its slice, so it is never returned directly.
+func (f *FS) sortedVisible(items []os.FileInfo) []os.FileInfo {
+	n := 0
+	for _, item := range items {
+		if !strings.HasPrefix(item.Name(), whPrefix) {
+			n++
+		}
+	}
+	out := make([]os.FileInfo, 0, n)
+	for _, item := range items {
+		if !strings.HasPrefix(item.Name(), whPrefix) {
+			out = append(out, item)
+		}
+	}
+	byName := func(a, b os.FileInfo) int { return strings.Compare(a.Name(), b.Name()) }
+	if !slices.IsSortedFunc(out, byName) {
+		slices.SortFunc(out, byName)
+	}
+	return out
 }
 
 // Open opens name read-only from whichever level provides it.
@@ -1513,7 +1563,35 @@ func (f *file) syncInfo() {
 func AppleDouble(name string) bool { return strings.HasPrefix(name, "._") }
 
 // Clean canonicalizes a path to slash-separated root-relative form.
-func Clean(p string) string { return strings.TrimPrefix(path.Clean("/"+filepath.ToSlash(p)), "/") }
+func Clean(p string) string {
+	p = filepath.ToSlash(p) // no-op (and allocation-free) where the separator is '/'
+	if slashRelativeClean(p) {
+		return p
+	}
+	return strings.TrimPrefix(path.Clean("/"+p), "/")
+}
+
+// slashRelativeClean reports whether p is already its own Clean form: empty,
+// or non-rooted segments with no empty, "." or ".." segment and no trailing slash.
+func slashRelativeClean(p string) bool {
+	for start := 0; start < len(p); {
+		end := strings.IndexByte(p[start:], '/')
+		if end < 0 {
+			end = len(p)
+		} else {
+			end += start
+		}
+		seg := p[start:end]
+		if seg == "" || seg == "." || seg == ".." {
+			return false
+		}
+		start = end + 1
+		if end == len(p)-1 {
+			return false // trailing slash
+		}
+	}
+	return true
+}
 
 // parent returns the canonical parent path, with the root represented by empty.
 func parent(p string) string {

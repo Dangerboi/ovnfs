@@ -149,4 +149,6 @@ func (s *ioSession) StatDir(h Handle) (Stamp, error) {
 
 func (*ioSession) StableStamps(Handle, Stamp) bool { return false }
 
+func (*ioSession) IdentifyDir(Handle) (ID, error) { return ID{}, errors.ErrUnsupported }
+
 func (*ioSession) Identify(string) (ID, error) { return ID{}, errors.ErrUnsupported }
