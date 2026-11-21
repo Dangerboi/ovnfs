@@ -277,9 +277,10 @@ func (r *Registry) prepareGit(ctx context.Context, tree store.OID, legacy, baseI
 	return dst, nil
 }
 
-// isHooksLink reports whether a git directory entry with this name, a symlink or
-// not (a junction counts as one), is a hooks link, which snapshots never keep (a
-// real hooks directory is kept).
+// isHooksLink reports whether a git directory entry named name is a hooks link,
+// which snapshots never keep; symlink says whether the entry is a link. A real
+// hooks directory is kept. dropHooksLinks counts a Windows junction as a link;
+// saveGitdir does not have to, since its walk stores no irregular entry at all.
 func isHooksLink(name string, symlink bool) bool {
 	return name == "hooks" && symlink
 }
