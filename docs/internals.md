@@ -91,7 +91,7 @@ a crash forgets the writes since.
 | `bases/<id>/` | a capture (`capture.bin`: compressed binary per-file stat data; bases from older builds keep `capture.json`), its lock, index copies, the git objects its checkouts commit, and `git-template/`, the private git directory its prepared checkouts copy |
 | `layers/` | frozen uppers until hashed, then only their non-source files and, above 1 KiB, the layer's compressed manifest; smaller manifests live in `state.json`, so such a stored-only layer needs no file or directory |
 | `uppers/` | each checkout's writable copy-on-write layer, named after the checkout, or `_p<id>` for one prepared before it had a name |
-| `git/` | private git directories, named like the uppers, each linking `objects` to its base's and `hooks` to the source repo's; a snapshot keeps its checkout's as a store tree without those links, so an unchanged index costs nothing per snapshot |
+| `git/` | private git directories, named like the uppers, each linking `objects` to its base's and `hooks` to the source repo's; a snapshot keeps its checkout's as a store tree without its `objects` links or any `hooks` symlink, so an unchanged index costs nothing per snapshot |
 | `jj/` | jj workspaces made for checkouts being created, until their `.jj` moves into the checkout's upper |
 | `store/` | git-format objects in append-only `packs/<n>.pack` (a full pack also gets `<n>.idx`); large blobs use content-defined chunks, or plain files under `objects/` when reflinks work |
 | `sources/` | each source folder's stat cache: which files still match the blob ids of its last capture's tree |

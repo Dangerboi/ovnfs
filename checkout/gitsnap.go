@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/stencil-hq/ovnfs/base"
 	"github.com/stencil-hq/ovnfs/git"
 	"github.com/stencil-hq/ovnfs/internal/hostfile"
 	"github.com/stencil-hq/ovnfs/source"
@@ -44,13 +45,12 @@ type gitCached struct {
 }
 
 // saveGitdir stores dir, a checkout's private git directory, as a tree and returns
-// its id. Three things are left out: the shared objects links (the root's and its
-// absorbed submodules'), the hooks links linkHooks made (hooks maps each git
-// directory's slash path below dir, "" for dir itself, to the target it links; a
-// hooks symlink to anywhere else, or a real hooks directory, is kept), and lock
-// files of in-flight git commands. Empty directories are kept, since git requires
-// refs/ to exist.
-func saveGitdir(st *store.Store, dir string, c *gitCache, hooks map[string]string) (store.OID, error) {
+// its id. Left out are the shared objects links (the root's and its absorbed
+// submodules'), symlinks named hooks of any target (the links to the source
+// repositories' hooks that linkHooks makes; a real hooks directory is kept), and
+// lock files of in-flight git commands. Empty directories are kept, since git
+// requires refs/ to exist.
+func saveGitdir(st *store.Store, dir string, c *gitCache) (store.OID, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// No object is removed while held, and Build keeps the tree's objects safe from
@@ -80,7 +80,7 @@ func saveGitdir(st *store.Store, dir string, c *gitCache, hooks map[string]strin
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if rel == "objects" || (d.Type()&fs.ModeSymlink != 0 && (d.Name() == "objects" || ownHooksLink(p, rel, hooks))) {
+		if rel == "objects" || (d.Type()&fs.ModeSymlink != 0 && (d.Name() == "objects" || d.Name() == "hooks")) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -164,21 +164,6 @@ func skipVanished(err error) error {
 	return err
 }
 
-// ownHooksLink reports whether symlink p, rel below a saved git directory, is a
-// hooks link linkHooks made (see saveGitdir's hooks).
-func ownHooksLink(p, rel string, hooks map[string]string) bool {
-	dir, name := path.Split(rel)
-	if name != "hooks" {
-		return false
-	}
-	want, ok := hooks[strings.TrimSuffix(dir, "/")]
-	if !ok {
-		return false
-	}
-	target, err := os.Readlink(p)
-	return err == nil && target == want
-}
-
 // materializeGitdir writes the git directory stored as tree into the new path dst,
 // linking its objects, and those of the absorbed submodules' git directories it
 // holds, to the base's shared object directories (objects of a source.Repo.Module).
@@ -235,13 +220,7 @@ func (r *Registry) saveGit(h *checkoutRecord) (store.OID, error) {
 	if !h.meta.Git {
 		return "", nil
 	}
-	r.mu.RLock()
-	var hooks map[string]string
-	if b := r.bases[h.meta.Base]; b != nil {
-		hooks = hooksLinks(b.view)
-	}
-	r.mu.RUnlock()
-	tree, err := saveGitdir(r.store, r.gitdirPath(h.meta.dir()), &h.git, hooks)
+	tree, err := saveGitdir(r.store, r.gitdirPath(h.meta.dir()), &h.git)
 	if err != nil && h.retired.Load() {
 		return "", failure("not_found", "no checkout %s", h.meta.Name)
 	}
@@ -254,7 +233,8 @@ func (r *Registry) saveGit(h *checkoutRecord) (store.OID, error) {
 // returns "" when the snapshot has no git directory. A snapshot taken by a build
 // that copied whole directories (legacy, no tree) is read from its copy. Every
 // submodule git directory in it loses the work tree git may have recorded for
-// the checkout the snapshot was taken of (git.UnsetModuleWorktrees).
+// the checkout the snapshot was taken of (git.UnsetModuleWorktrees), and it gets
+// the hooks links of a new checkout (linkHooks), whatever the snapshot held.
 func (r *Registry) prepareGit(ctx context.Context, tree store.OID, legacy, baseID string) (string, error) {
 	if tree == "" && (legacy == "" || !exists(legacy)) {
 		return "", nil
@@ -264,20 +244,30 @@ func (r *Registry) prepareGit(ctx context.Context, tree store.OID, legacy, baseI
 		return "", err
 	}
 	dst := filepath.Join(tmp, "git")
+	var view *base.Base
+	var modules []source.Repo
 	if tree != "" {
-		var modules []source.Repo
 		r.mu.RLock()
 		if b := r.bases[baseID]; b != nil {
-			modules = submodules(b.view)
+			view = b.view
+			modules = submodules(view)
 		}
 		r.mu.RUnlock()
 		objects := func(module string) string { return r.objectsPath(baseID, module) }
 		err = materializeGitdir(r.store, tree, dst, objects, modules)
 	} else {
 		err = git.CopyGitdir(legacy, dst, r.objectsPath(baseID, ""))
+		r.mu.RLock()
+		if b := r.bases[baseID]; b != nil {
+			view = b.view
+		}
+		r.mu.RUnlock()
 	}
 	if err == nil {
 		err = git.UnsetModuleWorktrees(dst)
+	}
+	if err == nil && view != nil {
+		err = linkHooks(dst, view)
 	}
 	if err != nil {
 		return "", errors.Join(err, os.RemoveAll(tmp))

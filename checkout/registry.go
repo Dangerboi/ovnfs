@@ -165,6 +165,8 @@ func Open(c Config) (*Registry, error) {
 		upper := r.upperPath(disk.dir())
 		if disk.Git {
 			gitdir := r.gitdirPath(disk.dir())
+			// The marker and the link change the directory, whose modification
+			// time is the checkout's idle time (touched): it is put back after both.
 			var mtime time.Time
 			if info, err := os.Lstat(gitdir); err == nil {
 				mtime = info.ModTime()
@@ -173,7 +175,12 @@ func Open(c Config) (*Registry, error) {
 				cleanup()
 				return nil, coded(err)
 			}
-			r.retrofitHooks(disk, b, gitdir, mtime)
+			r.retrofitHooks(disk, b, gitdir)
+			if after, err := os.Lstat(gitdir); err == nil && !mtime.IsZero() && !after.ModTime().Equal(mtime) {
+				if err := os.Chtimes(gitdir, mtime, mtime); err != nil {
+					r.enqueueNotice(baseNotice{base: disk.Base, fault: "restore idle time of checkout " + disk.Name + ": " + err.Error()})
+				}
+			}
 		}
 		fs, openErr := overlay.New(upper, stack, b.view.Bottom(), r.config.Memory)
 		if openErr != nil {
@@ -546,22 +553,10 @@ func (h *checkoutRecord) source() string {
 }
 
 // retrofitHooks gives an existing checkout the hooks link new ones get. A failure
-// is reported, not fatal: it must not keep every checkout down. mtime is the
-// private git directory's modification time before Open marked it: that time is
-// the checkout's idle time (touched), so it is put back around both writes Open
-// makes to the directory, the marker and the link, and neither shows in Touched
-// or rm --idle.
-func (r *Registry) retrofitHooks(disk diskCheckout, b *baseRecord, gitdir string, mtime time.Time) {
-	fault := func(err error) {
-		r.enqueueNotice(baseNotice{base: disk.Base, fault: "link hooks of checkout " + disk.Name + ": " + err.Error()})
-	}
+// is reported, not fatal: it must not keep every checkout down.
+func (r *Registry) retrofitHooks(disk diskCheckout, b *baseRecord, gitdir string) {
 	if err := linkHooks(gitdir, b.view); err != nil {
-		fault(err)
-	}
-	if after, err := os.Lstat(gitdir); err == nil && !mtime.IsZero() && !after.ModTime().Equal(mtime) {
-		if err := os.Chtimes(gitdir, mtime, mtime); err != nil {
-			fault(err)
-		}
+		r.enqueueNotice(baseNotice{base: disk.Base, fault: "link hooks of checkout " + disk.Name + ": " + err.Error()})
 	}
 }
 

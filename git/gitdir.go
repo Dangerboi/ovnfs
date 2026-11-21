@@ -117,16 +117,21 @@ func (r *Repo) MakeGitdir(gitdir, objects, index string) error {
 }
 
 // LinkHooks links gitdir's hooks to the repository's, so git finds the hooks a
-// linked work tree of the repository would. It leaves gitdir alone when the
-// repository has no usable hooks directory (none, a file, an unreadable entry) or
-// gitdir already has a hooks entry, such as the real directory of a submodule
-// cloned inside a checkout.
+// linked work tree of the repository would. It leaves gitdir alone when gitdir
+// already has a hooks entry, such as the real directory of a submodule cloned
+// inside a checkout. When the repository has no usable hooks directory (none, a
+// file, or an entry it cannot stat) it links nothing, and removes gitdir's hooks
+// entry if that is exactly the link LinkHooks made to it before; any other entry
+// stays.
 func (r *Repo) LinkHooks(gitdir string) error {
 	hooks := filepath.Join(r.CommonDir, "hooks")
+	link := filepath.Join(gitdir, "hooks")
 	if info, err := os.Stat(hooks); err != nil || !info.IsDir() {
+		if target, err := os.Readlink(link); err == nil && target == hooks {
+			return os.Remove(link)
+		}
 		return nil
 	}
-	link := filepath.Join(gitdir, "hooks")
 	if _, err := os.Lstat(link); err == nil {
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {

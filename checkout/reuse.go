@@ -32,8 +32,9 @@ import (
 //
 // A create on the warm capture takes a checkout prepared on it ahead of time (the
 // pool): upper, private git directory and overlay, below directories named by a
-// random key instead of a checkout name (checkoutMeta.Dir). Naming it writes only
-// the git directory's marker. The pool holds as many as the most creates of the
+// random key instead of a checkout name (checkoutMeta.Dir). Naming it writes the
+// git directory's marker, repoints its objects link and brings its hooks link up
+// to the source's. The pool holds as many as the most creates of the
 // folder seen running at once, at least poolMin, as far as their git directories
 // fit poolBudget. It is refilled in the background and goes with the warm capture,
 // or moves onto the next one while the repository's git state stays the same; that
@@ -476,7 +477,8 @@ func (r *Registry) openOnLocked(ctx context.Context, b *baseRecord, template git
 }
 
 // namePrepared names prepared checkout h: its git directories now mark it as
-// checkout name, and its objects are its base's (see setWarmLocked). config is the
+// checkout name, its objects are its base's (see setWarmLocked), and their hooks
+// links match the source's now (linkHooks), which may have changed since. config is the
 // root git directory's config as prepared.
 func (r *Registry) namePrepared(h *checkoutRecord, name, config string) error {
 	h.meta.Name, h.meta.Created = name, time.Now().UTC()

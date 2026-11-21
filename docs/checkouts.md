@@ -53,21 +53,23 @@ directory (`.git/hooks`, or the common git directory's when the folder is a
 linked worktree), so `pre-commit`, `commit-msg`, `post-checkout` and the other
 hooks run in a checkout as they do in a linked worktree of the folder. An
 absorbed submodule's private git directory links to the submodule's own
-`.git/modules/<name>/hooks`. A `core.hooksPath` set in the repository or
-globally still takes precedence, as it does in the folder. The link is read
-live, so editing a hook in the folder changes it for every checkout, and `rm`
-removes only the link, never the folder's hooks. Writes go through the link
-too: a hook installer run in a checkout (`pre-commit install`, husky,
-`git lfs install`, anything writing to `$(git rev-parse --git-common-dir)/hooks`)
-changes the folder's `.git/hooks`, or `.git/modules/<name>/hooks` from a
-submodule, for every checkout, as it would from a linked worktree. A folder
-without a readable hooks directory gets no link, and an existing `hooks` entry
-in a private git directory is never replaced. Checkouts without the link,
-including those opened before the folder had hooks, gain it when the daemon
-next opens their registry, provided the folder is still the top of a git
-repository, without changing their last-touched time. Snapshots do not store
-the link to the folder's hooks; `fork` and `new --from` link the new checkout
-to them again. A global hook that chains to
+`.git/modules/<name>/hooks`. A `core.hooksPath` set globally, or in the
+repository before the checkout was opened, takes precedence, as it does in the
+folder. The link works both ways: editing a hook in the folder changes it for
+every checkout, and a hook installer run in a checkout (`pre-commit install`,
+husky v4, `git lfs install`, anything writing to
+`$(git rev-parse --git-common-dir)/hooks`) writes the folder's hooks for every
+checkout, as it would from a linked worktree. `rm` removes only the link. A
+folder without a hooks directory (a file in its place counts as none) gets no
+link, and an existing `hooks` entry in a private git directory is never
+replaced. Checkouts without the link, including those opened before the folder
+had hooks, gain it when the daemon next opens their registry, provided the
+folder is still the top of a git repository, without changing their
+last-touched time; ovnfs removes its own link the same way once the folder's
+hooks directory is gone. Snapshots keep no `hooks` symlink, so `fork` and
+`new --from` link the new checkout to the folder's hooks, never to a link you
+made yourself; for hooks of a checkout's own, use a real `hooks` directory or
+`core.hooksPath` in its config. A global hook that chains to
 `$(git rev-parse --git-common-dir)/hooks/<name>` therefore reaches the
 folder's hooks from a checkout. Git commands that ovnfs runs itself run with
 hooks off.

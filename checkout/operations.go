@@ -622,16 +622,19 @@ func (r *Registry) prepareCheckout(name, dir string, b *baseRecord, layers []*ov
 		case err != nil:
 		case gs.template != "":
 			err = git.CopyGitdir(gs.template, gitdir, r.objectsPath(b.view.Meta().ID, ""))
+			if err == nil {
+				err = linkHooks(gitdir, b.view)
+			}
 		case gs.repo != nil:
 			err = r.makeGitdirs(gitdir, b.view.Meta().ID, gs)
-		default:
+			if err == nil {
+				err = linkHooks(gitdir, b.view)
+			}
+		default: // prepareGit linked its hooks
 			err = os.Rename(gs.ready, gitdir)
 		}
 		if err == nil && gs.rev != nil {
 			err = gs.rev.SetHEAD(gitdir)
-		}
-		if err == nil {
-			err = linkHooks(gitdir, b.view)
 		}
 		if err == nil && name != "" {
 			err = markGitdirs(gitdir, name, b.view)
@@ -699,42 +702,24 @@ func markGitdirs(gitdir, name string, view *base.Base) error {
 	return nil
 }
 
-// hooksRepos returns the repositories whose hooks a checkout's private git
-// directories link to, by the directory's slash path below the root one ("" for
-// the root, a submodule's source.Repo.Module): those the base captured, not
-// another found at their place, such as an enclosing one once the folder's own is
-// gone. A base without a repository has none.
-func hooksRepos(view *base.Base) map[string]*git.Repo {
+// linkHooks links the hooks of a checkout's private git directory and of its
+// absorbed submodules' that it still has to those of the repositories the base
+// captured (git.Repo.LinkHooks). A repository found at another place than the
+// captured folder (an enclosing one, once the folder's own is gone) and a base
+// without a repository have none to link.
+func linkHooks(gitdir string, view *base.Base) error {
 	top := view.Meta().Dir
-	out := map[string]*git.Repo{}
 	if repo := view.Domains().Repo(""); repo != nil && sameDir(repo.Top, top) {
-		out[""] = repo
+		if err := repo.LinkHooks(gitdir); err != nil {
+			return err
+		}
 	}
 	for _, sub := range submodules(view) {
 		repo := view.Domains().Repo(sub.Path)
-		if repo != nil && sameDir(repo.Top, filepath.Join(top, filepath.FromSlash(sub.Path))) {
-			out[sub.Module] = repo
+		if repo == nil || !sameDir(repo.Top, filepath.Join(top, filepath.FromSlash(sub.Path))) {
+			continue
 		}
-	}
-	return out
-}
-
-// hooksLinks is the link each private git directory of a checkout on view gets
-// for its hooks (hooksRepos' keys), to that repository's hooks directory.
-func hooksLinks(view *base.Base) map[string]string {
-	out := map[string]string{}
-	for dir, repo := range hooksRepos(view) {
-		out[dir] = filepath.Join(repo.CommonDir, "hooks")
-	}
-	return out
-}
-
-// linkHooks links the hooks of a checkout's private git directory and of its
-// absorbed submodules' that it still has to those of the repositories the base
-// captured (git.Repo.LinkHooks).
-func linkHooks(gitdir string, view *base.Base) error {
-	for dir, repo := range hooksRepos(view) {
-		dir = filepath.Join(gitdir, filepath.FromSlash(dir))
+		dir := filepath.Join(gitdir, filepath.FromSlash(sub.Module))
 		if _, err := os.Lstat(filepath.Join(dir, "HEAD")); errors.Is(err, os.ErrNotExist) {
 			continue // removed in the checkout
 		}

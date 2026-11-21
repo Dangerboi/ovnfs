@@ -401,7 +401,7 @@ func TestGitdirKeepsLockNamedModules(t *testing.T) {
 	write(t, filepath.Join(dir, "index.lock"), "")
 	write(t, filepath.Join(dir, "modules", "dep.lock", "HEAD"), "ref: refs/heads/main\n")
 	write(t, filepath.Join(dir, "modules", "dep.lock", "config.lock"), "")
-	tree, err := saveGitdir(f.reg.store, dir, &gitCache{}, nil)
+	tree, err := saveGitdir(f.reg.store, dir, &gitCache{})
 	if err != nil {
 		t.Fatal(err)
 	}
