@@ -45,6 +45,7 @@ type gitCached struct {
 
 // saveGitdir stores dir, a checkout's private git directory, as a tree and returns
 // its id. The shared objects links (the root's and its absorbed submodules') and
+// the links to the source repositories' hooks (a real hooks directory is kept) and
 // lock files of in-flight git commands are left out; empty directories are kept,
 // since git requires refs/ to exist.
 func saveGitdir(st *store.Store, dir string, c *gitCache) (store.OID, error) {
@@ -77,7 +78,7 @@ func saveGitdir(st *store.Store, dir string, c *gitCache) (store.OID, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if rel == "objects" || (d.Name() == "objects" && d.Type()&fs.ModeSymlink != 0) {
+		if rel == "objects" || (d.Type()&fs.ModeSymlink != 0 && (d.Name() == "objects" || d.Name() == "hooks")) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -164,6 +165,8 @@ func skipVanished(err error) error {
 // materializeGitdir writes the git directory stored as tree into the new path dst,
 // linking its objects, and those of the absorbed submodules' git directories it
 // holds, to the base's shared object directories (objects of a source.Repo.Module).
+// Its hooks are linked afterwards, with the other git directories of a new checkout
+// (linkHooks).
 func materializeGitdir(st *store.Store, tree store.OID, dst string, objects func(module string) string, modules []source.Repo) error {
 	files, err := st.Flatten(tree)
 	if err != nil {

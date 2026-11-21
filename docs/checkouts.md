@@ -47,6 +47,26 @@ forked checkouts with their own names. Existing checkouts gain this marker when
 the daemon next opens their registry. The marker is never written to the source
 repo.
 
+A checkout's private git directory links `hooks` to the folder's hooks
+directory (`.git/hooks`, or the common git directory's when the folder is a
+linked worktree), so `pre-commit`, `commit-msg`, `post-checkout` and the other
+hooks run in a checkout as they do in a linked worktree of the folder. An
+absorbed submodule's private git directory links to the submodule's own
+`.git/modules/<name>/hooks`. A `core.hooksPath` set in the repository or
+globally still takes precedence, as it does in the folder. The link is read
+live, so editing a hook in the folder changes it for every checkout, and `rm`
+removes only the link, never the folder's hooks. A folder without a hooks
+directory gets no link, and an existing `hooks` entry in a private git
+directory is never replaced. Checkouts without the link, including those
+opened before the folder had hooks, gain it when the daemon next opens their
+registry, provided the folder still holds the repository they were captured
+from, without changing their last-touched time. Snapshots do not store the
+link; `fork` and `new --from` link the new checkout to the folder's hooks
+again. A global hook that chains to
+`$(git rev-parse --git-common-dir)/hooks/<name>` therefore reaches the
+folder's hooks from a checkout. Git commands that ovnfs runs itself run with
+hooks off.
+
 ### Git remotes
 
 The folder's repository gets a remote `ovnfs/NAME` for each live checkout NAME

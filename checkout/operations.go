@@ -630,6 +630,9 @@ func (r *Registry) prepareCheckout(name, dir string, b *baseRecord, layers []*ov
 		if err == nil && gs.rev != nil {
 			err = gs.rev.SetHEAD(gitdir)
 		}
+		if err == nil {
+			err = linkHooks(gitdir, b.view)
+		}
 		if err == nil && name != "" {
 			err = markGitdirs(gitdir, name, b.view)
 		}
@@ -694,6 +697,44 @@ func markGitdirs(gitdir, name string, view *base.Base) error {
 		}
 	}
 	return nil
+}
+
+// linkHooks links the hooks of a checkout's private git directory and of its
+// absorbed submodules' that it still has to those of the repositories the base
+// captured (git.Repo.LinkHooks). A repository found at another place than the
+// captured folder (an enclosing one, once the folder's own is gone) and a base
+// without a repository have none to link.
+func linkHooks(gitdir string, view *base.Base) error {
+	top := view.Meta().Dir
+	if repo := view.Domains().Repo(""); repo != nil && sameDir(repo.Top, top) {
+		if err := repo.LinkHooks(gitdir); err != nil {
+			return err
+		}
+	}
+	for _, sub := range submodules(view) {
+		repo := view.Domains().Repo(sub.Path)
+		if repo == nil || !sameDir(repo.Top, filepath.Join(top, filepath.FromSlash(sub.Path))) {
+			continue
+		}
+		dir := filepath.Join(gitdir, filepath.FromSlash(sub.Module))
+		if _, err := os.Lstat(filepath.Join(dir, "HEAD")); errors.Is(err, os.ErrNotExist) {
+			continue // removed in the checkout
+		}
+		if err := repo.LinkHooks(dir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sameDir reports whether a and b are the same directory, however either spells it.
+func sameDir(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	return err == nil && os.SameFile(ai, bi)
 }
 
 // installGitfiles points a new checkout's submodules at their private git

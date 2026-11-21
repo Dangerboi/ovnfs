@@ -164,10 +164,13 @@ func Open(c Config) (*Registry, error) {
 		}
 		upper := r.upperPath(disk.dir())
 		if disk.Git {
-			if err := git.MarkCheckout(r.gitdirPath(disk.dir()), disk.Name); err != nil {
+			gitdir := r.gitdirPath(disk.dir())
+			before, statErr := os.Lstat(gitdir)
+			if err := git.MarkCheckout(gitdir, disk.Name); err != nil {
 				cleanup()
 				return nil, coded(err)
 			}
+			r.retrofitHooks(disk, b, gitdir, before, statErr)
 		}
 		fs, openErr := overlay.New(upper, stack, b.view.Bottom(), r.config.Memory)
 		if openErr != nil {
@@ -537,6 +540,27 @@ func (h *checkoutRecord) source() string {
 		return meta.Remote.Source
 	}
 	return meta.Dir
+}
+
+// retrofitHooks gives an existing checkout the hooks link new ones get. A failure
+// is reported, not fatal: it must not keep every checkout down. The link changes
+// the private git directory, whose modification time is the checkout's idle time
+// (touched), so that time is put back; before is the directory as it was found.
+func (r *Registry) retrofitHooks(disk diskCheckout, b *baseRecord, gitdir string, before os.FileInfo, statErr error) {
+	fault := func(err error) {
+		r.enqueueNotice(baseNotice{base: disk.Base, fault: "link hooks of checkout " + disk.Name + ": " + err.Error()})
+	}
+	if err := linkHooks(gitdir, b.view); err != nil {
+		fault(err)
+	}
+	if statErr != nil {
+		return
+	}
+	if after, err := os.Lstat(gitdir); err == nil && !after.ModTime().Equal(before.ModTime()) {
+		if err := os.Chtimes(gitdir, before.ModTime(), before.ModTime()); err != nil {
+			fault(err)
+		}
+	}
 }
 
 // touched is when a checkout last changed: through its folder (see

@@ -115,6 +115,27 @@ func (r *Repo) MakeGitdir(gitdir, objects, index string) error {
 	return hostfile.Symlink(objects, filepath.Join(gitdir, "objects"))
 }
 
+// LinkHooks links gitdir's hooks to the repository's, so git finds the hooks a
+// linked work tree of the repository would. It leaves gitdir alone when the
+// repository has no hooks directory or gitdir already has a hooks entry, such as
+// the real directory of a submodule cloned inside a checkout.
+func (r *Repo) LinkHooks(gitdir string) error {
+	hooks := filepath.Join(r.CommonDir, "hooks")
+	if _, err := os.Stat(hooks); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	link := filepath.Join(gitdir, "hooks")
+	if _, err := os.Lstat(link); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return hostfile.Symlink(hooks, link)
+}
+
 // UnsetModuleWorktrees removes core.worktree from every submodule git directory
 // below a private git directory restored for another checkout, as MakeGitdir does
 // at creation: git records it when it (re)connects a submodule, as a path into the
