@@ -254,3 +254,37 @@ func TestLinkHooksKeepsLinkWhenStatFails(t *testing.T) {
 		t.Fatalf("link after a failed stat = %q, %v", target, err)
 	}
 }
+
+// TestLinkHooksRemovesLinkToBrokenHooks treats a source hooks entry that can never
+// resolve (a symlink loop) as gone, and removes the link made to it.
+func TestLinkHooksRemovesLinkToBrokenHooks(t *testing.T) {
+	repoDir := t.TempDir()
+	testGit(t, repoDir, "init", "-q")
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := filepath.Join(repo.CommonDir, "hooks")
+	if err := os.RemoveAll(hooks); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitdir := t.TempDir()
+	if err := repo.LinkHooks(gitdir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(hooks); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(hooks, hooks); err != nil {
+		t.Skipf("no symlinks: %v", err)
+	}
+	if err := repo.LinkHooks(gitdir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(gitdir, "hooks")); !os.IsNotExist(err) {
+		t.Fatalf("link to a looping hooks entry stays: %v", err)
+	}
+}

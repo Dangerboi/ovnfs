@@ -175,8 +175,8 @@ func Open(c Config) (*Registry, error) {
 				cleanup()
 				return nil, coded(err)
 			}
-			// Best effort, a notice and not a failure: an unreadable source (an
-			// unmounted volume) must not keep every checkout down.
+			// Best effort, a notice and not a failure: a failure to make or remove
+			// the link in the private git directory must not keep every checkout down.
 			if err := linkHooks(gitdir, b.view); err != nil {
 				r.enqueueNotice(baseNotice{base: disk.Base, fault: "link hooks of checkout " + disk.Name + ": " + err.Error()})
 			}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/stencil-hq/ovnfs/internal/clone"
 	"github.com/stencil-hq/ovnfs/internal/hostfile"
@@ -119,16 +120,17 @@ func (r *Repo) MakeGitdir(gitdir, objects, index string) error {
 // LinkHooks links gitdir's hooks to the repository's, so git finds the hooks a
 // linked work tree of the repository would. It leaves gitdir alone when gitdir
 // already has a hooks entry, such as the real directory of a submodule cloned
-// inside a checkout. When the repository's hooks are gone or are not a directory
-// it links nothing, and removes gitdir's hooks entry if that is exactly the link
-// LinkHooks made to it before; any other entry stays. When the hooks cannot be
-// examined (a permission or I/O error) it changes nothing: a link must not go on
-// a failure that may pass.
+// inside a checkout. When the repository's hooks are gone, are not a directory
+// or can never resolve (a symlink loop, a path through a file), it links nothing
+// and removes gitdir's hooks entry if that is exactly the link LinkHooks made to
+// it before; any other entry stays. When the hooks cannot be examined (a
+// permission or I/O error) it changes nothing: a link must not go on a failure
+// that may pass.
 func (r *Repo) LinkHooks(gitdir string) error {
 	hooks := filepath.Join(r.CommonDir, "hooks")
 	link := filepath.Join(gitdir, "hooks")
 	info, err := os.Stat(hooks)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ELOOP) && !errors.Is(err, syscall.ENOTDIR) {
 		return nil
 	}
 	if err != nil || !info.IsDir() {

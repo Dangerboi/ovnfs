@@ -6,8 +6,8 @@
 // source-class paths are part of a snapshot's identity; cache and local paths
 // are served copy-on-write from the folder itself; hidden paths do not exist.
 // A checkout of a git repository also gets a private git directory, so git works
-// inside it without writing to the user's repository (its hooks are the
-// repository's own, so what they write lands there).
+// inside it without writing to the user's repository (its hooks link to the
+// repository's own, so writes to them land there).
 //
 // Every method on Registry is one admin operation (package api) with the same
 // name and argument struct as the CLI verb.
