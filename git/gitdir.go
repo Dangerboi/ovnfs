@@ -16,8 +16,9 @@ import (
 // the user's repository: HEAD, refs, config and the index are copies taken at
 // capture, and "objects" links to an object directory shared by every checkout on
 // same base, which borrows the user's objects through alternates. Commits
-// made in a checkout land there; the user's repository is never written,
-// except for checkout remotes (see SetCheckoutRemotes).
+// made in a checkout land there; ovnfs never writes the user's repository,
+// except for checkout remotes (see SetCheckoutRemotes). "hooks" links to the
+// repository's own (see LinkHooks), so writes to it land there.
 
 // PrepareObjects creates a base's shared object directory that reads the repository's objects through alternates.
 func (r *Repo) PrepareObjects(dir string) error {
@@ -117,15 +118,13 @@ func (r *Repo) MakeGitdir(gitdir, objects, index string) error {
 
 // LinkHooks links gitdir's hooks to the repository's, so git finds the hooks a
 // linked work tree of the repository would. It leaves gitdir alone when the
-// repository has no hooks directory or gitdir already has a hooks entry, such as
-// the real directory of a submodule cloned inside a checkout.
+// repository has no usable hooks directory (none, a file, an unreadable entry) or
+// gitdir already has a hooks entry, such as the real directory of a submodule
+// cloned inside a checkout.
 func (r *Repo) LinkHooks(gitdir string) error {
 	hooks := filepath.Join(r.CommonDir, "hooks")
-	if _, err := os.Stat(hooks); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
+	if info, err := os.Stat(hooks); err != nil || !info.IsDir() {
+		return nil
 	}
 	link := filepath.Join(gitdir, "hooks")
 	if _, err := os.Lstat(link); err == nil {

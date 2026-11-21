@@ -490,6 +490,9 @@ func (r *Registry) namePrepared(h *checkoutRecord, name, config string) error {
 			return err
 		}
 	}
+	if err := linkHooks(gitdir, h.base.view); err != nil {
+		return err
+	}
 	if len(submodules(h.base.view)) == 0 {
 		return git.MarkNew(gitdir, config, name)
 	}

@@ -51,10 +51,10 @@ func assertHookRuns(t *testing.T, dir, record string) {
 
 // assertHookCheckout runs the source's hook in the exported checkout and checks
 // that the link left it clean.
-func (f *fixture) assertHookCheckout(name, record string) {
+func (f *fixture) assertHookCheckout(name, sub, record string) {
 	f.t.Helper()
 	exported := f.export(name)
-	assertHookRuns(f.t, exported, record)
+	assertHookRuns(f.t, filepath.Join(exported, filepath.FromSlash(sub)), record)
 	if got := gitRun(f.t, exported, "status", "--porcelain"); got != "" {
 		f.t.Fatalf("git status in %s = %q", name, got)
 	}
@@ -113,7 +113,7 @@ func TestHooksRunInEveryCreatePath(t *testing.T) {
 			dir := reuseRepo(t)
 			record := installHook(t, filepath.Join(dir, ".git", "hooks"))
 			name := c.open(t, f, dir)
-			f.assertHookCheckout(name, record)
+			f.assertHookCheckout(name, "", record)
 		})
 	}
 }
@@ -134,7 +134,7 @@ func TestHooksSnapshotRelink(t *testing.T) {
 	if _, err := f.reg.New(ctx, api.NewArgs{Snapshot: snap, Name: "fromold"}); err != nil {
 		t.Fatal(err)
 	}
-	f.assertHookCheckout("fromold", record)
+	f.assertHookCheckout("fromold", "", record)
 
 	f.newCheckout(dir, "linked")
 	snap, tree := f.snapGit("linked")
@@ -150,7 +150,7 @@ func TestHooksSnapshotRelink(t *testing.T) {
 	if _, err := f.reg.New(ctx, api.NewArgs{Snapshot: snap, Name: "fromlinked"}); err != nil {
 		t.Fatal(err)
 	}
-	f.assertHookCheckout("fromlinked", record)
+	f.assertHookCheckout("fromlinked", "", record)
 
 	f.newCheckout(dir, "own")
 	own := filepath.Join(f.gitdir("own"), "hooks")
@@ -192,7 +192,7 @@ func TestHooksReopenRelinks(t *testing.T) {
 	write(t, filepath.Join(own, "custom"), "mine")
 	f.reg.Close()
 	f.open()
-	f.assertHookCheckout("old", record)
+	f.assertHookCheckout("old", "", record)
 	if info, err := os.Lstat(own); err != nil || !info.IsDir() {
 		t.Fatalf("a real hooks directory was replaced: %v, %v", info, err)
 	}
@@ -247,17 +247,7 @@ func TestHooksSubmodule(t *testing.T) {
 	app := submoduleRepo(t)
 	record := installHook(t, filepath.Join(app, ".git", "modules", "vendor", "sub", "hooks"))
 	f.newCheckout(app, "app")
-	check := func(name string) {
-		t.Helper()
-		exported := f.export(name)
-		assertHookRuns(t, filepath.Join(exported, "vendor", "sub"), record)
-		if got := gitRun(t, exported, "status", "--porcelain"); got != "" {
-			t.Fatalf("git status in %s = %q", name, got)
-		}
-		if f.dirty(name) {
-			t.Fatalf("checkout %s reports changes", name)
-		}
-	}
+	check := func(name string) { f.assertHookCheckout(name, "vendor/sub", record) }
 	check("app")
 	if _, err := f.reg.Fork(context.Background(), api.ForkArgs{Checkout: "app", Name: "child"}); err != nil {
 		t.Fatal(err)
@@ -325,4 +315,65 @@ func TestHooksOnlyOfCapturedRepo(t *testing.T) {
 	if _, err := os.Lstat(link); !os.IsNotExist(err) {
 		t.Fatalf("checkout linked to the enclosing repository's hooks: %v", err)
 	}
+}
+
+// TestHooksAddedAfterPoolFilled opens a checkout from a pool filled while the
+// source had no hooks directory, after one was added.
+func TestHooksAddedAfterPoolFilled(t *testing.T) {
+	f := newFixture(t)
+	if f.reg.watcher == nil {
+		t.Skip("no folder events on this platform")
+	}
+	dir := reuseRepo(t)
+	hooks := filepath.Join(dir, ".git", "hooks")
+	if err := os.RemoveAll(hooks); err != nil {
+		t.Fatal(err)
+	}
+	f.newCheckout(dir, "first")
+	eventually(t, "the pool did not fill", func() bool { return f.poolFull(dir) })
+	record := installHook(t, hooks)
+	f.newCheckout(dir, "c")
+	f.assertHookCheckout("c", "", record)
+}
+
+// TestHooksSourceHooksNotADirectory makes checkouts of a repository whose hooks
+// entry is a file: no link, and no failure.
+func TestHooksSourceHooksNotADirectory(t *testing.T) {
+	f := newFixture(t)
+	dir := reuseRepo(t)
+	hooks := filepath.Join(dir, ".git", "hooks")
+	if err := os.RemoveAll(hooks); err != nil {
+		t.Fatal(err)
+	}
+	write(t, hooks, "not a directory")
+	f.newCheckout(dir, "app")
+	if _, err := os.Lstat(filepath.Join(f.gitdir("app"), "hooks")); !os.IsNotExist(err) {
+		t.Fatalf("hooks entry from a source hooks file: %v", err)
+	}
+}
+
+// TestHooksOwnLinkSurvivesSnapshot keeps a hooks link the user pointed at their
+// own directory through a snapshot and a checkout from it.
+func TestHooksOwnLinkSurvivesSnapshot(t *testing.T) {
+	f := newFixture(t)
+	dir := reuseRepo(t)
+	installHook(t, filepath.Join(dir, ".git", "hooks"))
+	f.newCheckout(dir, "app")
+	mine := filepath.Join(t.TempDir(), "myhooks")
+	record := installHook(t, mine)
+	link := filepath.Join(f.gitdir("app"), "hooks")
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(mine, link); err != nil {
+		t.Skipf("no symlinks: %v", err)
+	}
+	snap, _ := f.snapGit("app")
+	if _, err := f.reg.New(context.Background(), api.NewArgs{Snapshot: snap, Name: "child"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.Readlink(filepath.Join(f.gitdir("child"), "hooks")); err != nil || got != mine {
+		t.Fatalf("child hooks link = %q, %v, want %s", got, err, mine)
+	}
+	f.assertHookCheckout("child", "", record)
 }

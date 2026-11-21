@@ -44,11 +44,13 @@ type gitCached struct {
 }
 
 // saveGitdir stores dir, a checkout's private git directory, as a tree and returns
-// its id. The shared objects links (the root's and its absorbed submodules') and
-// the links to the source repositories' hooks (a real hooks directory is kept) and
-// lock files of in-flight git commands are left out; empty directories are kept,
-// since git requires refs/ to exist.
-func saveGitdir(st *store.Store, dir string, c *gitCache) (store.OID, error) {
+// its id. Three things are left out: the shared objects links (the root's and its
+// absorbed submodules'), the hooks links linkHooks made (hooks maps each git
+// directory's slash path below dir, "" for dir itself, to the target it links; a
+// hooks symlink to anywhere else, or a real hooks directory, is kept), and lock
+// files of in-flight git commands. Empty directories are kept, since git requires
+// refs/ to exist.
+func saveGitdir(st *store.Store, dir string, c *gitCache, hooks map[string]string) (store.OID, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// No object is removed while held, and Build keeps the tree's objects safe from
@@ -78,7 +80,7 @@ func saveGitdir(st *store.Store, dir string, c *gitCache) (store.OID, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if rel == "objects" || (d.Type()&fs.ModeSymlink != 0 && (d.Name() == "objects" || d.Name() == "hooks")) {
+		if rel == "objects" || (d.Type()&fs.ModeSymlink != 0 && (d.Name() == "objects" || ownHooksLink(p, rel, hooks))) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -162,6 +164,21 @@ func skipVanished(err error) error {
 	return err
 }
 
+// ownHooksLink reports whether symlink p, rel below a saved git directory, is a
+// hooks link linkHooks made (see saveGitdir's hooks).
+func ownHooksLink(p, rel string, hooks map[string]string) bool {
+	dir, name := path.Split(rel)
+	if name != "hooks" {
+		return false
+	}
+	want, ok := hooks[strings.TrimSuffix(dir, "/")]
+	if !ok {
+		return false
+	}
+	target, err := os.Readlink(p)
+	return err == nil && target == want
+}
+
 // materializeGitdir writes the git directory stored as tree into the new path dst,
 // linking its objects, and those of the absorbed submodules' git directories it
 // holds, to the base's shared object directories (objects of a source.Repo.Module).
@@ -218,7 +235,13 @@ func (r *Registry) saveGit(h *checkoutRecord) (store.OID, error) {
 	if !h.meta.Git {
 		return "", nil
 	}
-	tree, err := saveGitdir(r.store, r.gitdirPath(h.meta.dir()), &h.git)
+	r.mu.RLock()
+	var hooks map[string]string
+	if b := r.bases[h.meta.Base]; b != nil {
+		hooks = hooksLinks(b.view)
+	}
+	r.mu.RUnlock()
+	tree, err := saveGitdir(r.store, r.gitdirPath(h.meta.dir()), &h.git, hooks)
 	if err != nil && h.retired.Load() {
 		return "", failure("not_found", "no checkout %s", h.meta.Name)
 	}

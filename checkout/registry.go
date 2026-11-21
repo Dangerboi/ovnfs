@@ -165,12 +165,15 @@ func Open(c Config) (*Registry, error) {
 		upper := r.upperPath(disk.dir())
 		if disk.Git {
 			gitdir := r.gitdirPath(disk.dir())
-			before, statErr := os.Lstat(gitdir)
+			var mtime time.Time
+			if info, err := os.Lstat(gitdir); err == nil {
+				mtime = info.ModTime()
+			}
 			if err := git.MarkCheckout(gitdir, disk.Name); err != nil {
 				cleanup()
 				return nil, coded(err)
 			}
-			r.retrofitHooks(disk, b, gitdir, before, statErr)
+			r.retrofitHooks(disk, b, gitdir, mtime)
 		}
 		fs, openErr := overlay.New(upper, stack, b.view.Bottom(), r.config.Memory)
 		if openErr != nil {
@@ -543,21 +546,20 @@ func (h *checkoutRecord) source() string {
 }
 
 // retrofitHooks gives an existing checkout the hooks link new ones get. A failure
-// is reported, not fatal: it must not keep every checkout down. The link changes
-// the private git directory, whose modification time is the checkout's idle time
-// (touched), so that time is put back; before is the directory as it was found.
-func (r *Registry) retrofitHooks(disk diskCheckout, b *baseRecord, gitdir string, before os.FileInfo, statErr error) {
+// is reported, not fatal: it must not keep every checkout down. mtime is the
+// private git directory's modification time before Open marked it: that time is
+// the checkout's idle time (touched), so it is put back around both writes Open
+// makes to the directory, the marker and the link, and neither shows in Touched
+// or rm --idle.
+func (r *Registry) retrofitHooks(disk diskCheckout, b *baseRecord, gitdir string, mtime time.Time) {
 	fault := func(err error) {
 		r.enqueueNotice(baseNotice{base: disk.Base, fault: "link hooks of checkout " + disk.Name + ": " + err.Error()})
 	}
 	if err := linkHooks(gitdir, b.view); err != nil {
 		fault(err)
 	}
-	if statErr != nil {
-		return
-	}
-	if after, err := os.Lstat(gitdir); err == nil && !after.ModTime().Equal(before.ModTime()) {
-		if err := os.Chtimes(gitdir, before.ModTime(), before.ModTime()); err != nil {
+	if after, err := os.Lstat(gitdir); err == nil && !mtime.IsZero() && !after.ModTime().Equal(mtime) {
+		if err := os.Chtimes(gitdir, mtime, mtime); err != nil {
 			fault(err)
 		}
 	}
