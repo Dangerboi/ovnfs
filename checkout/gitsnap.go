@@ -186,8 +186,8 @@ func materializeGitdir(st *store.Store, tree store.OID, dst string, objects func
 		case store.ModeDir:
 			err = os.MkdirAll(target, 0o755)
 		case store.ModeSymlink:
-			if isHooksLink(path.Base(p), fs.ModeSymlink) {
-				continue // one an older build stored, often the user's own; linkHooks makes the new checkout's
+			if path.Base(p) == "hooks" {
+				continue // isHooksLink's rule: one an older build stored, often the user's own; linkHooks makes the new checkout's
 			}
 			var link []byte
 			if link, err = st.ReadBlob(f.ID); err == nil {
@@ -292,7 +292,7 @@ func dropHooksLinks(gitdir string) error {
 			return err
 		}
 		info, err := hostfile.Lstat(p)
-		if err != nil || !isHooksLink("hooks", info.Mode()) {
+		if err != nil || !isHooksLink(d.Name(), info.Mode()) {
 			return err
 		}
 		return os.Remove(p)

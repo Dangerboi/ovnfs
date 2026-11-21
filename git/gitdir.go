@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/stencil-hq/ovnfs/internal/clone"
 	"github.com/stencil-hq/ovnfs/internal/hostfile"
@@ -130,7 +129,7 @@ func (r *Repo) LinkHooks(gitdir string) error {
 	hooks := filepath.Join(r.CommonDir, "hooks")
 	link := filepath.Join(gitdir, "hooks")
 	info, err := os.Stat(hooks)
-	if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ELOOP) && !errors.Is(err, syscall.ENOTDIR) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) && !hostfile.Unresolvable(err) {
 		return nil
 	}
 	if err != nil || !info.IsDir() {

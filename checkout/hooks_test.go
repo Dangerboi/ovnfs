@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/stencil-hq/ovnfs/api"
-	"github.com/stencil-hq/ovnfs/git"
 	"github.com/stencil-hq/ovnfs/store"
 )
 
@@ -443,39 +442,21 @@ func TestHooksLegacySnapshotLinks(t *testing.T) {
 	dir := reuseRepo(t)
 	record := installHook(t, filepath.Join(dir, ".git", "hooks"))
 	f.newCheckout(dir, "app")
-	id, _ := f.snapGit("app")
-	gitdir := f.gitdir("app")
-	if err := f.reg.Close(); err != nil {
-		t.Fatal(err)
-	}
-	legacy := filepath.Join(f.state, "snapshots", id)
-	if err := os.MkdirAll(legacy, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	copied := filepath.Join(legacy, "git")
-	if err := git.CopyGitdir(gitdir, copied, "unused"); err != nil {
-		t.Fatal(err)
-	}
 	mine := filepath.Join(t.TempDir(), "myhooks")
 	installHook(t, mine)
-	extra := filepath.Join(copied, "modules", "extra")
-	write(t, filepath.Join(extra, "HEAD"), "ref: refs/heads/main\n")
-	write(t, filepath.Join(extra, "config"), "[core]\n\tbare = false\n")
-	for _, link := range []string{filepath.Join(copied, "hooks"), filepath.Join(extra, "hooks")} {
-		if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
-			t.Fatal(err)
+	id := f.legacySnapshot("app", func(copied string) {
+		extra := filepath.Join(copied, "modules", "extra")
+		write(t, filepath.Join(extra, "HEAD"), "ref: refs/heads/main\n")
+		write(t, filepath.Join(extra, "config"), "[core]\n\tbare = false\n")
+		for _, link := range []string{filepath.Join(copied, "hooks"), filepath.Join(extra, "hooks")} {
+			if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(mine, link); err != nil {
+				t.Skipf("no symlinks: %v", err)
+			}
 		}
-		if err := os.Symlink(mine, link); err != nil {
-			t.Skipf("no symlinks: %v", err)
-		}
-	}
-	d := readDisk(t, f.state)
-	for i := range d.Snapshots {
-		d.Snapshots[i].Git = ""
-	}
-	if err := writeState(f.state, d); err != nil {
-		t.Fatal(err)
-	}
+	})
 	f.open()
 	if _, err := f.reg.New(context.Background(), api.NewArgs{Snapshot: id, Name: "child"}); err != nil {
 		t.Fatal(err)
