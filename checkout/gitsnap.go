@@ -80,7 +80,7 @@ func saveGitdir(st *store.Store, dir string, c *gitCache) (store.OID, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if rel == "objects" || (d.Type()&fs.ModeSymlink != 0 && d.Name() == "objects") || isHooksLink(d.Name(), d.Type()) {
+		if rel == "objects" || (d.Type()&fs.ModeSymlink != 0 && d.Name() == "objects") || isHooksLink(d.Name(), d.Type()&fs.ModeSymlink != 0) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -178,6 +178,9 @@ func materializeGitdir(st *store.Store, tree store.OID, dst string, objects func
 		return err
 	}
 	for p, f := range files {
+		if isHooksLink(path.Base(p), f.Mode == store.ModeSymlink) {
+			continue // one an older build stored, often the user's own; linkHooks makes the new checkout's
+		}
 		target := filepath.Join(dst, filepath.FromSlash(p))
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
@@ -186,9 +189,6 @@ func materializeGitdir(st *store.Store, tree store.OID, dst string, objects func
 		case store.ModeDir:
 			err = os.MkdirAll(target, 0o755)
 		case store.ModeSymlink:
-			if path.Base(p) == "hooks" {
-				continue // isHooksLink's rule: one an older build stored, often the user's own; linkHooks makes the new checkout's
-			}
 			var link []byte
 			if link, err = st.ReadBlob(f.ID); err == nil {
 				err = os.Symlink(string(link), target)
@@ -277,10 +277,11 @@ func (r *Registry) prepareGit(ctx context.Context, tree store.OID, legacy, baseI
 	return dst, nil
 }
 
-// isHooksLink reports whether a git directory entry of this name and type is a
-// hooks link, which snapshots never keep (a real hooks directory is kept).
-func isHooksLink(name string, mode fs.FileMode) bool {
-	return name == "hooks" && mode&fs.ModeSymlink != 0
+// isHooksLink reports whether a git directory entry with this name, a symlink or
+// not (a junction counts as one), is a hooks link, which snapshots never keep (a
+// real hooks directory is kept).
+func isHooksLink(name string, symlink bool) bool {
+	return name == "hooks" && symlink
 }
 
 // dropHooksLinks removes every hooks symlink (or junction) from a copied git
@@ -288,12 +289,17 @@ func isHooksLink(name string, mode fs.FileMode) bool {
 // skips them; a real hooks directory stays.
 func dropHooksLinks(gitdir string) error {
 	return filepath.WalkDir(gitdir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.Name() != "hooks" {
+		if err != nil {
 			return err
 		}
-		info, err := hostfile.Lstat(p)
-		if err != nil || !isHooksLink(d.Name(), info.Mode()) {
-			return err
+		symlink := d.Type()&fs.ModeSymlink != 0
+		if d.Type()&fs.ModeIrregular != 0 { // a Windows junction
+			if info, err := d.Info(); err == nil {
+				symlink = hostfile.Linked(info, p).Mode()&fs.ModeSymlink != 0
+			}
+		}
+		if !isHooksLink(d.Name(), symlink) {
+			return nil
 		}
 		return os.Remove(p)
 	})

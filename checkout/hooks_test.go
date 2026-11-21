@@ -444,7 +444,7 @@ func TestHooksLegacySnapshotLinks(t *testing.T) {
 	f.newCheckout(dir, "app")
 	mine := filepath.Join(t.TempDir(), "myhooks")
 	installHook(t, mine)
-	id := f.legacySnapshot("app", func(copied string) {
+	id, _ := f.legacySnapshot("app", func(copied string) {
 		extra := filepath.Join(copied, "modules", "extra")
 		write(t, filepath.Join(extra, "HEAD"), "ref: refs/heads/main\n")
 		write(t, filepath.Join(extra, "config"), "[core]\n\tbare = false\n")

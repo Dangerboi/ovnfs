@@ -229,12 +229,7 @@ func TestLinkHooksKeepsLinkWhenStatFails(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("permissions do not deny access here")
 	}
-	repoDir := t.TempDir()
-	testGit(t, repoDir, "init", "-q")
-	repo, err := Open(repoDir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repo := testRepo(t)
 	hooks := filepath.Join(repo.CommonDir, "hooks")
 	if err := os.MkdirAll(hooks, 0o755); err != nil {
 		t.Fatal(err)
@@ -272,12 +267,7 @@ func TestLinkHooksRemovesLinkToUnresolvableHooks(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			repoDir := t.TempDir()
-			testGit(t, repoDir, "init", "-q")
-			repo, err := Open(repoDir)
-			if err != nil {
-				t.Fatal(err)
-			}
+			repo := testRepo(t)
 			hooks := filepath.Join(repo.CommonDir, "hooks")
 			if err := os.RemoveAll(hooks); err != nil {
 				t.Fatal(err)

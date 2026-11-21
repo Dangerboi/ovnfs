@@ -138,15 +138,16 @@ func TestGitSnapshotTreesAreGCRoots(t *testing.T) {
 // legacySnapshot snapshots checkout as a build that copied whole git directories
 // did: it closes the registry, stores the checkout's git directory as a copy at
 // snapshots/<id>/git (edit changes the copy first), and clears the snapshot's
-// git tree. The caller reopens the registry; the snapshot's id is returned.
-func (f *fixture) legacySnapshot(checkout string, edit func(copied string)) string {
+// git tree. The caller reopens the registry; the snapshot's id and its directory
+// are returned.
+func (f *fixture) legacySnapshot(checkout string, edit func(copied string)) (id, legacy string) {
 	f.t.Helper()
-	id, _ := f.snapGit(checkout)
+	id, _ = f.snapGit(checkout)
 	gitdir := f.gitdir(checkout)
 	if err := f.reg.Close(); err != nil {
 		f.t.Fatal(err)
 	}
-	legacy := filepath.Join(f.state, "snapshots", id)
+	legacy = filepath.Join(f.state, "snapshots", id)
 	if err := os.MkdirAll(legacy, 0o700); err != nil {
 		f.t.Fatal(err)
 	}
@@ -164,7 +165,7 @@ func (f *fixture) legacySnapshot(checkout string, edit func(copied string)) stri
 	if err := writeState(f.state, d); err != nil {
 		f.t.Fatal(err)
 	}
-	return id
+	return id, legacy
 }
 
 // TestLegacySnapshotGitCopy opens a snapshot recorded by a build that copied the whole
@@ -176,8 +177,7 @@ func TestLegacySnapshotGitCopy(t *testing.T) {
 	f.newCheckout(dir, "app")
 	gitdir := f.gitdir("app")
 	head := gitRun(t, dir, "--git-dir", gitdir, "rev-parse", "HEAD")
-	id := f.legacySnapshot("app", nil)
-	legacy := filepath.Join(f.state, "snapshots", id)
+	id, legacy := f.legacySnapshot("app", nil)
 	gitRun(t, dir, "--git-dir", gitdir, "commit", "--allow-empty", "-qm", "later")
 	f.open()
 	if _, err := f.reg.New(ctx, api.NewArgs{Snapshot: id, Name: "view"}); err != nil {
