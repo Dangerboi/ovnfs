@@ -69,9 +69,9 @@ last-touched time; ovnfs removes its own link the same way once the folder's
 hooks directory is gone. Snapshots keep no `hooks` symlink, so `fork` and
 `new --from` link the new checkout to the folder's hooks, never to a link you
 made yourself; for hooks of a checkout's own, use a real `hooks` directory or
-`core.hooksPath` in its config. A global hook that chains to
-`$(git rev-parse --git-common-dir)/hooks/<name>` therefore reaches the
-folder's hooks from a checkout. Git commands that ovnfs runs itself run with
+`core.hooksPath` in its config. Through the link, a global hook that chains to
+`$(git rev-parse --git-common-dir)/hooks/<name>` reaches the folder's hooks
+from a checkout. Git commands that ovnfs runs itself run with
 hooks off.
 
 ### Git remotes

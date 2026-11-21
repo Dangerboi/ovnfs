@@ -622,16 +622,13 @@ func (r *Registry) prepareCheckout(name, dir string, b *baseRecord, layers []*ov
 		case err != nil:
 		case gs.template != "":
 			err = git.CopyGitdir(gs.template, gitdir, r.objectsPath(b.view.Meta().ID, ""))
-			if err == nil {
-				err = linkHooks(gitdir, b.view)
-			}
 		case gs.repo != nil:
 			err = r.makeGitdirs(gitdir, b.view.Meta().ID, gs)
-			if err == nil {
-				err = linkHooks(gitdir, b.view)
-			}
-		default: // prepareGit linked its hooks
+		default:
 			err = os.Rename(gs.ready, gitdir)
+		}
+		if err == nil && gs.ready == "" { // prepareGit linked a ready directory's
+			err = linkHooks(gitdir, b.view)
 		}
 		if err == nil && gs.rev != nil {
 			err = gs.rev.SetHEAD(gitdir)

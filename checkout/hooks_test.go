@@ -82,6 +82,20 @@ func (f *fixture) fillPool(dir string) {
 	eventually(f.t, "the pool did not fill", func() bool { return f.poolFull(dir) })
 }
 
+// assertNoStoredHooks checks that the stored git tree holds no hooks entry.
+func (f *fixture) assertNoStoredHooks(tree string) {
+	f.t.Helper()
+	files, err := f.reg.store.Flatten(store.OID(tree))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	for p := range files {
+		if p == "hooks" || strings.HasPrefix(p, "hooks/") {
+			f.t.Fatalf("snapshot stores %s of a hooks link", p)
+		}
+	}
+}
+
 // TestHooksRunInEveryCreatePath checks that the hooks of the source repository run
 // in checkouts opened by every create path.
 func TestHooksRunInEveryCreatePath(t *testing.T) {
@@ -153,15 +167,7 @@ func TestHooksSnapshotRelink(t *testing.T) {
 
 	f.newCheckout(dir, "linked")
 	snap, tree := f.snapGit("linked")
-	files, err := f.reg.store.Flatten(store.OID(tree))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for p := range files {
-		if p == "hooks" || strings.HasPrefix(p, "hooks/") {
-			t.Fatalf("snapshot stores %s of the hooks link", p)
-		}
-	}
+	f.assertNoStoredHooks(tree)
 	if _, err := f.reg.New(ctx, api.NewArgs{Snapshot: snap, Name: "fromlinked"}); err != nil {
 		t.Fatal(err)
 	}
@@ -387,13 +393,40 @@ func TestHooksOwnLinkNotSnapshotted(t *testing.T) {
 		t.Skipf("no symlinks: %v", err)
 	}
 	snap, tree := f.snapGit("app")
+	f.assertNoStoredHooks(tree)
+	if _, err := f.reg.New(context.Background(), api.NewArgs{Snapshot: snap, Name: "child"}); err != nil {
+		t.Fatal(err)
+	}
+	f.assertHookCheckout("child", "", record)
+}
+
+// TestHooksOlderSnapshotLink restores a snapshot an older build took of a git
+// directory holding a hooks symlink the user made: the checkout from it still
+// gets the source's hooks.
+func TestHooksOlderSnapshotLink(t *testing.T) {
+	f := newFixture(t)
+	dir := reuseRepo(t)
+	record := installHook(t, filepath.Join(dir, ".git", "hooks"))
+	f.newCheckout(dir, "app")
+	snap, tree := f.snapGit("app")
 	files, err := f.reg.store.Flatten(store.OID(tree))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := files["hooks"]; ok {
-		t.Fatal("snapshot stores a hooks symlink")
+	mine := filepath.Join(t.TempDir(), "myhooks")
+	installHook(t, mine)
+	id, err := f.reg.store.PutBytes([]byte(mine))
+	if err != nil {
+		t.Fatal(err)
 	}
+	files["hooks"] = store.File{Mode: store.ModeSymlink, ID: id}
+	older, err := f.reg.store.Build(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.reg.mu.Lock()
+	f.reg.snapshots[snap].git = older
+	f.reg.mu.Unlock()
 	if _, err := f.reg.New(context.Background(), api.NewArgs{Snapshot: snap, Name: "child"}); err != nil {
 		t.Fatal(err)
 	}

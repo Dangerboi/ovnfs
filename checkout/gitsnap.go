@@ -167,8 +167,8 @@ func skipVanished(err error) error {
 // materializeGitdir writes the git directory stored as tree into the new path dst,
 // linking its objects, and those of the absorbed submodules' git directories it
 // holds, to the base's shared object directories (objects of a source.Repo.Module).
-// Its hooks are linked afterwards, with the other git directories of a new checkout
-// (linkHooks).
+// It leaves out symlinks named hooks, which older builds stored; the hooks are
+// linked afterwards, with the other git directories of a new checkout (linkHooks).
 func materializeGitdir(st *store.Store, tree store.OID, dst string, objects func(module string) string, modules []source.Repo) error {
 	files, err := st.Flatten(tree)
 	if err != nil {
@@ -186,6 +186,9 @@ func materializeGitdir(st *store.Store, tree store.OID, dst string, objects func
 		case store.ModeDir:
 			err = os.MkdirAll(target, 0o755)
 		case store.ModeSymlink:
+			if path.Base(p) == "hooks" {
+				continue // a link made by a build that stored them; linkHooks makes the new checkout's
+			}
 			var link []byte
 			if link, err = st.ReadBlob(f.ID); err == nil {
 				err = os.Symlink(string(link), target)
@@ -234,7 +237,8 @@ func (r *Registry) saveGit(h *checkoutRecord) (store.OID, error) {
 // that copied whole directories (legacy, no tree) is read from its copy. Every
 // submodule git directory in it loses the work tree git may have recorded for
 // the checkout the snapshot was taken of (git.UnsetModuleWorktrees), and it gets
-// the hooks links of a new checkout (linkHooks), whatever the snapshot held.
+// the hooks links of a new checkout (linkHooks), unless it holds a real hooks
+// directory; a hooks symlink the snapshot held is never kept.
 func (r *Registry) prepareGit(ctx context.Context, tree store.OID, legacy, baseID string) (string, error) {
 	if tree == "" && (legacy == "" || !exists(legacy)) {
 		return "", nil
@@ -246,22 +250,20 @@ func (r *Registry) prepareGit(ctx context.Context, tree store.OID, legacy, baseI
 	dst := filepath.Join(tmp, "git")
 	var view *base.Base
 	var modules []source.Repo
+	r.mu.RLock()
+	if b := r.bases[baseID]; b != nil {
+		view = b.view
+		modules = submodules(view)
+	}
+	r.mu.RUnlock()
 	if tree != "" {
-		r.mu.RLock()
-		if b := r.bases[baseID]; b != nil {
-			view = b.view
-			modules = submodules(view)
-		}
-		r.mu.RUnlock()
 		objects := func(module string) string { return r.objectsPath(baseID, module) }
 		err = materializeGitdir(r.store, tree, dst, objects, modules)
 	} else {
 		err = git.CopyGitdir(legacy, dst, r.objectsPath(baseID, ""))
-		r.mu.RLock()
-		if b := r.bases[baseID]; b != nil {
-			view = b.view
+		if err == nil {
+			err = dropHooksLinks(dst, modules)
 		}
-		r.mu.RUnlock()
 	}
 	if err == nil {
 		err = git.UnsetModuleWorktrees(dst)
@@ -273,6 +275,25 @@ func (r *Registry) prepareGit(ctx context.Context, tree store.OID, legacy, baseI
 		return "", errors.Join(err, os.RemoveAll(tmp))
 	}
 	return dst, nil
+}
+
+// dropHooksLinks removes the symlinks (or Windows junctions) named hooks that a
+// copied git directory brought, from its root and its absorbed submodules' git
+// directories; a real hooks directory stays.
+func dropHooksLinks(gitdir string, modules []source.Repo) error {
+	dirs := []string{gitdir}
+	for _, m := range modules {
+		dirs = append(dirs, filepath.Join(gitdir, filepath.FromSlash(m.Module)))
+	}
+	for _, dir := range dirs {
+		link := filepath.Join(dir, "hooks")
+		if info, err := hostfile.Lstat(link); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+			if err := os.Remove(link); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // discardGit removes a prepared git directory installation did not move into place.

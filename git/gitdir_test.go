@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -218,5 +219,38 @@ func TestMakeGitdirConfig(t *testing.T) {
 		if strings.Join(got[key], ",") != strings.Join(values, ",") {
 			t.Errorf("%s = %v, want %v", key, got[key], values)
 		}
+	}
+}
+
+// TestLinkHooksKeepsLinkWhenStatFails keeps the link LinkHooks made when the
+// repository's hooks cannot be told apart from gone, such as under an unreadable
+// .git: only hooks that are really gone remove it.
+func TestLinkHooksKeepsLinkWhenStatFails(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("permissions do not deny access here")
+	}
+	repoDir := t.TempDir()
+	testGit(t, repoDir, "init", "-q")
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := filepath.Join(repo.CommonDir, "hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitdir := t.TempDir()
+	if err := repo.LinkHooks(gitdir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(repo.CommonDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(repo.CommonDir, 0o755) })
+	if err := repo.LinkHooks(gitdir); err != nil {
+		t.Fatal(err)
+	}
+	if target, err := os.Readlink(filepath.Join(gitdir, "hooks")); err != nil || target != hooks {
+		t.Fatalf("link after a failed stat = %q, %v", target, err)
 	}
 }

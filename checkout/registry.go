@@ -175,7 +175,11 @@ func Open(c Config) (*Registry, error) {
 				cleanup()
 				return nil, coded(err)
 			}
-			r.retrofitHooks(disk, b, gitdir)
+			// Best effort, a notice and not a failure: an unreadable source (an
+			// unmounted volume) must not keep every checkout down.
+			if err := linkHooks(gitdir, b.view); err != nil {
+				r.enqueueNotice(baseNotice{base: disk.Base, fault: "link hooks of checkout " + disk.Name + ": " + err.Error()})
+			}
 			if after, err := os.Lstat(gitdir); err == nil && !mtime.IsZero() && !after.ModTime().Equal(mtime) {
 				if err := os.Chtimes(gitdir, mtime, mtime); err != nil {
 					r.enqueueNotice(baseNotice{base: disk.Base, fault: "restore idle time of checkout " + disk.Name + ": " + err.Error()})
@@ -550,14 +554,6 @@ func (h *checkoutRecord) source() string {
 		return meta.Remote.Source
 	}
 	return meta.Dir
-}
-
-// retrofitHooks gives an existing checkout the hooks link new ones get. A failure
-// is reported, not fatal: it must not keep every checkout down.
-func (r *Registry) retrofitHooks(disk diskCheckout, b *baseRecord, gitdir string) {
-	if err := linkHooks(gitdir, b.view); err != nil {
-		r.enqueueNotice(baseNotice{base: disk.Base, fault: "link hooks of checkout " + disk.Name + ": " + err.Error()})
-	}
 }
 
 // touched is when a checkout last changed: through its folder (see
