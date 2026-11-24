@@ -918,16 +918,16 @@ func (f *FS) Flush() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.drainLocked(); err != nil {
-		return err
+		return upperError(err)
 	}
 	for _, m := range f.files {
 		if err := f.spill(m); err != nil {
-			return err
+			return upperError(err)
 		}
 	}
 	// The other names of multi-name files were queued as links.
 	if err := f.drainLocked(); err != nil {
-		return err
+		return upperError(err)
 	}
 	return f.settleDirs(f.upper)
 }

@@ -1,8 +1,13 @@
 package overlay
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/stencil-hq/ovnfs/internal/ident"
@@ -119,7 +124,7 @@ func (f *FS) refreshUnsettled(d string) error {
 		return nil
 	}
 	if err := f.settleDir(d, f.up(d)); err != nil {
-		return err
+		return upperError(err)
 	}
 	if info, err = f.stat(d); err != nil {
 		return err
@@ -146,12 +151,101 @@ func (f *FS) settleDir(d, real string) error {
 // settleDirs settles every unsettled directory of the upper rooted at root.
 // The caller holds f.mu exclusively.
 func (f *FS) settleDirs(root string) error {
-	for d := range f.unsettled {
-		if err := f.settleDir(d, filepath.Join(root, filepath.FromSlash(d))); err != nil {
-			return err
+	for len(f.unsettled) != 0 {
+		for d := range f.unsettled {
+			err := f.settleDir(d, filepath.Join(root, d))
+			if errors.Is(err, fs.ErrNotExist) {
+				err = f.reconcileDir(root, d, err)
+			}
+			if err != nil {
+				return upperError(err)
+			}
 		}
 	}
 	return nil
+}
+
+// reconcileDir forgets a vanished upper-only directory tree if it contains
+// no data or markers. Check from the highest missing ancestor: a child whose
+// time is pending may be the only sign that the entire subtree disappeared.
+func (f *FS) reconcileDir(root, d string, cause error) error {
+	lost := d
+	for q := d; ; q = parent(q) {
+		info, err := os.Lstat(filepath.Join(root, q))
+		switch {
+		case q != "" && errors.Is(err, fs.ErrNotExist):
+			lost = q
+		case err != nil:
+			return err // includes a missing upper root, which must not be dropped
+		case q == d || !info.IsDir():
+			return cause // reappeared, or the path was replaced (e.g. by a symlink)
+		}
+		if q == "" {
+			break
+		}
+	}
+	real := filepath.Join(root, lost)
+	if p := f.lostDirData(lost); p != "" {
+		return fmt.Errorf("overlay: upper directory %s disappeared with indexed data or markers at %s: %w", real, p, syscall.EIO)
+	}
+	if !f.index.barrier(lost) {
+		// A copy-up may hold intentional mode, owner or time changes. Do
+		// not fall through to the lower entry after losing that metadata.
+		_, _, err := f.lookupBelow(lost, f.lowerPath(lost))
+		if err == nil {
+			return fmt.Errorf("overlay: upper directory %s disappeared over a lower entry: %w", real, syscall.EIO)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+
+	// The surviving parent's listing changed. Refresh its host metadata
+	// and stamp a visible change even if a pending mtime hid the deletion
+	// or the parent was already settled during this pass.
+	par := parent(lost)
+	info, err := statHost(filepath.Join(root, par), f.ids)
+	if err != nil {
+		return err
+	}
+	if e := f.index.entries[par]; e.Kind != KindDir || !info.IsDir() || !sameEntry(e.Info, info) {
+		return cause
+	}
+	now := time.Now()
+	if timed, ok := retimed(info, now, now); ok {
+		info = timed
+		f.unsettled[par] = struct{}{}
+	} else {
+		delete(f.unsettled, par)
+	}
+	f.dropIndex(lost)
+	f.cacheInfo(par, info)
+	f.names.Add(1)
+	return nil
+}
+
+// lostDirData returns the first path unsafe to forget, or "" if the entire
+// non-root subtree consists of unmarked directories.
+func (f *FS) lostDirData(d string) string {
+	e := f.index.entries[d]
+	if e.Kind != KindDir || e.Info == nil || e.Opaque || e.Redirect != "" || f.files[d] != nil {
+		return d
+	}
+	for n := range f.index.children[d] {
+		if p := f.lostDirData(path.Join(d, n)); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+// upperError changes missing internal paths to I/O errors without masking
+// other host failures. Such paths do not mean the user's name was missing.
+func upperError(err error) error {
+	if missing(err) {
+		return fmt.Errorf("overlay: upper filesystem: %v: %w", err, syscall.EIO)
+	}
+	return err
 }
 
 // settleAncestors writes the indexed times of p's unsettled ancestors to the
@@ -164,7 +258,7 @@ func (f *FS) settleAncestors(p string) error {
 	for d := parent(p); ; d = parent(d) {
 		if _, ok := f.unsettled[d]; ok {
 			if err := os.Chtimes(f.up(d), time.Time{}, f.index.entries[d].Info.ModTime()); err != nil {
-				return err
+				return upperError(err)
 			}
 		}
 		if d == "" {

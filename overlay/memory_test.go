@@ -260,6 +260,124 @@ func TestMemoryNameChangesStampParent(t *testing.T) {
 	}
 }
 
+func TestFlushReconcilesVanishedDirectory(t *testing.T) {
+	if !retimable() {
+		t.Skip("host does not defer visible directory times")
+	}
+	f, err := New(t.TempDir(), nil, nil, NewMemory(1<<20, 64<<10, 0))
+	must(t, err)
+	must(t, f.MkdirAll("build/old/leaf", 0o755))
+	must(t, f.MkdirAll("build/old/sibling", 0o755))
+	must(t, f.Flush())
+	must(t, f.Chtimes("build", past, past))
+	before, err := f.Lstat("build/old")
+	must(t, err)
+	deferTestDirTime(t, f, "build/old/leaf")
+	if _, ok := f.unsettled["build/old"]; ok {
+		t.Fatal("only a descendant should need its time settled")
+	}
+	write(t, f, "source.txt", "source edit", os.O_CREATE|os.O_WRONLY)
+	epoch := f.Names()
+	must(t, os.RemoveAll(f.up("build/old")))
+	must(t, f.Flush())
+
+	assertNames(t, f, "build")
+	assertGone(t, f, "build/old/sibling")
+	if p, ok := f.Locate(handleID(before)); ok {
+		t.Fatalf("vanished directory identity still resolves to %s", p)
+	}
+	after, err := f.Lstat("build")
+	must(t, err)
+	host, err := os.Stat(f.up("build"))
+	must(t, err)
+	if f.Names() == epoch || !host.ModTime().After(past) || !host.ModTime().Equal(after.ModTime()) || len(f.unsettled) != 0 {
+		t.Fatalf("reconciliation did not settle the visible parent change: host %s, index %s, pending %v", host.ModTime(), after.ModTime(), f.unsettled)
+	}
+	data, err := os.ReadFile(f.up("source.txt"))
+	must(t, err)
+	if string(data) != "source edit" {
+		t.Fatalf("unrelated pending write = %q", data)
+	}
+	must(t, f.Flush())
+	assertIndexMatchesDisk(t, f)
+}
+
+func TestFlushRefusesLostUpperData(t *testing.T) {
+	if !retimable() {
+		t.Skip("host does not defer visible directory times")
+	}
+	for _, tc := range []struct {
+		name  string
+		lower map[string]string
+		make  func(*testing.T, *FS)
+		keep  string
+	}{
+		{"file", nil, func(t *testing.T, f *FS) {
+			write(t, f, "d/code", "source edit", os.O_CREATE|os.O_WRONLY)
+		}, "d/code"},
+		{"whiteout", map[string]string{"d/code": "lower"}, func(t *testing.T, f *FS) {
+			must(t, f.Remove("d/code"))
+		}, "d/code"},
+		{"lower directory metadata", map[string]string{"d/code": "lower"}, func(t *testing.T, f *FS) {
+			must(t, f.Chmod("d", 0o700))
+		}, "d"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := New(t.TempDir(), nil, dirBottom{tree(t, tc.lower)}, NewMemory(1<<20, 64<<10, 0))
+			must(t, err)
+			must(t, f.MkdirAll("d/pending", 0o755))
+			tc.make(t, f)
+			must(t, f.Flush())
+			deferTestDirTime(t, f, "d/pending")
+			must(t, os.RemoveAll(f.up("d")))
+
+			for range 2 {
+				err := f.Flush()
+				if !errors.Is(err, syscall.EIO) || missing(err) || !strings.Contains(err.Error(), f.up("d")) {
+					t.Fatalf("Flush with vanished upper = %v, want EIO naming the directory", err)
+				}
+			}
+			if _, ok := f.index.entries[tc.keep]; !ok {
+				t.Fatalf("failed reconciliation forgot %s", tc.keep)
+			}
+		})
+	}
+}
+
+func TestFlushPreservesMemoryFileInVanishedDirectory(t *testing.T) {
+	f, err := New(t.TempDir(), nil, nil, NewMemory(1<<20, 64<<10, 0))
+	must(t, err)
+	must(t, f.MkdirAll("src", 0o755))
+	must(t, f.Flush())
+	write(t, f, "src/code", "pending source edit", os.O_CREATE|os.O_WRONLY)
+	away := filepath.Join(t.TempDir(), "src")
+	must(t, os.Rename(f.up("src"), away))
+
+	if err := f.Flush(); !errors.Is(err, syscall.EIO) || missing(err) || !strings.Contains(err.Error(), f.up("src/code")) {
+		t.Fatalf("Flush with unavailable spill destination = %v, want EIO naming the file", err)
+	}
+	if !f.Unflushed() || read(t, f, "src/code") != "pending source edit" {
+		t.Fatal("failed flush did not retain the pending write")
+	}
+	must(t, os.Rename(away, f.up("src")))
+	must(t, f.Flush())
+	data, err := os.ReadFile(f.up("src/code"))
+	must(t, err)
+	if string(data) != "pending source edit" {
+		t.Fatalf("flushed pending write = %q", data)
+	}
+}
+
+func deferTestDirTime(t *testing.T, f *FS, d string) {
+	t.Helper()
+	p := path.Join(d, "temporary")
+	write(t, f, p, "transient", os.O_CREATE|os.O_WRONLY)
+	must(t, f.Remove(p))
+	if _, ok := f.unsettled[d]; !ok || f.Unflushed() {
+		t.Fatalf("%s should have a pending mtime but no pending writes", d)
+	}
+}
+
 // TestMemoryFilesShowTheirDiskOwner reports a memory file's owner as a host
 // create in its directory would set it, so moving the file to disk changes
 // no attribute a client caches.

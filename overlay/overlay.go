@@ -82,8 +82,9 @@ type FS struct {
 
 // Names returns the generation of the overlay's namespace, which advances
 // after every change that may move or remove a visible entry: Remove,
-// Rename, Rebase, Discard and a copy-up that separates hard links. Creating
-// an entry moves none, nor does an ordinary copy-up, spill or freeze.
+// Rename, Rebase, Discard, a copy-up that separates hard links, or recovering
+// a missing upper directory. Creating an entry moves none, nor does an
+// ordinary copy-up, spill or freeze.
 // A path [FS.Locate] returned for an identity stays that identity's while
 // Names, read before the Locate, is unchanged:
 // the export caches resolutions on it.
@@ -271,7 +272,7 @@ func (f *FS) Freeze(dir string) (*Layer, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.drainLocked(); err != nil {
-		return nil, err
+		return nil, upperError(err)
 	}
 	if f.upper == "" {
 		return nil, &fs.PathError{Op: "freeze", Path: dir, Err: syscall.EROFS}
@@ -1727,7 +1728,7 @@ retry:
 	if _, ok := f.unsettled[p]; ok {
 		// The host change re-reads the directory, whose time must be the index's.
 		if err := f.settleDir(p, f.up(p)); err != nil {
-			return err
+			return upperError(err)
 		}
 	}
 	if err := host(f.up(p)); err != nil {
