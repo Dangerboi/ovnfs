@@ -1480,8 +1480,20 @@ func (r *Registry) keepCommits(ctx context.Context, name string) error {
 	if held.Commits > 1 {
 		what, them = fmt.Sprintf("%d commits that no branch of %s reaches, the newest %.12s %q", held.Commits, dir, held.Tip, held.Subject), "them"
 	}
-	return failure("conflict", "checkout %s holds %s: `ovnfs land %s` or `ovnfs apply %s --branch NAME` puts %s there, and `ovnfs rm %s --force` discards %s",
-		name, what, name, name, them, name, them)
+	r.mu.RLock()
+	var origin string
+	if h.meta.Parent != nil {
+		if snap := r.snapshots[*h.meta.Parent]; snap != nil && snap.meta.Checkout != name {
+			origin = snap.meta.Checkout
+		}
+	}
+	r.mu.RUnlock()
+	note := "; a cherry-pick or rebase can keep the changes without keeping the original commit IDs"
+	if origin != "" {
+		note += fmt.Sprintf("; this checkout started from %s, and inherited commits can count too", origin)
+	}
+	return failure("conflict", "checkout %s holds %s: `ovnfs land %s` or `ovnfs apply %s --branch NAME` can preserve the original commits; `ovnfs rm %s --force` discards %s%s",
+		name, what, name, name, name, them, note)
 }
 
 // remove is Rm, except that with picked set it keeps a checkout whose Touched is

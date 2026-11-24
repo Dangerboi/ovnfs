@@ -218,8 +218,10 @@ asking, and prints `removed NAME`. The one thing it refuses to discard is a
 commit made in the checkout that nothing else keeps: no ref of the folder's
 repository reaches it (as after `land`, `apply --branch` or a merge of the
 checkout's [git remote](#git-remotes)), and the checkout did not push it. The
-message counts those commits and names the newest; `rm --force` removes the
-checkout anyway. `prune`, the end of `run` and the socket API's `rm` without
+message counts those commits and names the newest. A fork can inherit them,
+and cherry-picking or rebasing can preserve their changes without keeping
+their original commit IDs. Use `rm --force` only if those originals can be
+discarded. `prune`, the end of `run` and the socket API's `rm` without
 `keep_commits` do not check.
 
 `new` on a checkout's root normally forks it. With `--rev`, `new` and `run`
