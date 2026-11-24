@@ -27,10 +27,11 @@ width.
 SIZE` (`OVNFS_BLOB_CACHE`, default `16M`) size the memory tiers described in
 [internals](internals.md#memory-tiers); `start` passes the environment on.
 `serve --fsync` (or `OVNFS_FSYNC=1`) makes a handle sync on FUSE, SMB or
-WinFsp spill a named memory-backed file to the upper and sync its host file.
-It is off by default and does not sync parent directories or make snapshots
-durable. NFS handles [stable writes and COMMIT](platforms.md#nfs) regardless
-of this option.
+WinFsp spill a named memory-backed file to the upper and sync its host file,
+and makes NFS [stable writes and COMMIT](platforms.md#nfs) sync theirs.
+It is off by default and does not make snapshots durable. Off, an application
+`fsync` or `close` on any mount is no durability barrier: a crash of the
+daemon or the host can lose data the call acknowledged.
 
 With the memory tier on, a daemon crash or `kill -9` loses what the daemon
 had not yet put on the host: written files that had not spilled, and the name
@@ -247,7 +248,7 @@ env:
 | `mount` | path | `~/.o2/ovnfs.yml` only: where checkouts appear |
 | `proto` | string | user file only: default file server protocol (`nfs`, `smb`, `fuse`, or `winfsp`) |
 | `memory` | size | user file only: memory budget for written files (default 64M) |
-| `fsync` | boolean | user file only: spill and sync memory-backed files on fsync |
+| `fsync` | boolean | user file only: spill and sync files on fsync, NFS stable writes and COMMIT |
 | `blob_cache` | size | user file only: memory budget for content-addressed blobs (default 16M) |
 | `atime` | boolean | user file only: allow access time updates |
 | `nfs_io_size` | size | user file only: NFS transfer size, power of two from 4K to 1M (default 128K; 0 uses default) |

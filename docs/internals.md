@@ -562,9 +562,9 @@ its first name is installed as any spill installs it and the others follow
 as one queued host link change, so a crash can lose those names but never
 leaves a second copy of the file (Windows and `--memory 0` link on disk in
 the call).
-On FUSE, SMB and WinFsp a handle sync spills memory files only with `--fsync`.
-[NFS stable writes and COMMIT](platforms.md#nfs) spill and sync their file
-regardless of the flag; unstable writes can stay in memory.
+A handle sync on FUSE, SMB and WinFsp, and an
+[NFS stable write or COMMIT](platforms.md#nfs), spill and sync memory files
+only with `--fsync`; unstable NFS writes can stay in memory either way.
 
 With the memory tier the loaded upper index is the truth for names too, and
 the upper on disk trails it:

@@ -708,6 +708,40 @@ func TestV3WriteCommitVerifier(t *testing.T) {
 	}
 }
 
+// syncCounter counts the files the server syncs.
+type syncCounter struct {
+	*testFS
+	synced atomic.Int32
+}
+
+func (f *syncCounter) SyncFile(p string, id, gen uint64, writer billy.File) error {
+	f.synced.Add(1)
+	return f.testFS.SyncFile(p, id, gen, writer)
+}
+
+// TestV3NoSync checks that a server told not to sync reports every write as
+// FILE_SYNC, so that clients send no COMMIT, and syncs for neither.
+func TestV3NoSync(t *testing.T) {
+	fs := &syncCounter{testFS: newTestFS(t)}
+	fs.write(t, "f", "hello world")
+	c := dial(t, startServer(t, &Server{FS: fs, NoSync: true}))
+	id := fs.FileID("f")
+	for _, how := range []uint32{unstable3, 1, fileSync3} {
+		if st, n, committed, _ := c.write3(id, 0, how, []byte("H")); st != stOK || n != 1 || committed != fileSync3 {
+			t.Fatalf("WRITE stable_how %d: %d count %d committed %d", how, st, n, committed)
+		}
+	}
+	if st, _ := c.commit3(id); st != stOK {
+		t.Fatalf("COMMIT: %d", st)
+	}
+	if n := fs.synced.Load(); n != 0 {
+		t.Fatalf("synced %d times, want none", n)
+	}
+	if got, _ := os.ReadFile(fs.host("f")); string(got) != "Hello world" {
+		t.Fatalf("file holds %q", got)
+	}
+}
+
 // TestV3SetattrGuard checks the SETATTR guard: a ctime other than the one
 // GETATTR reports fails NOT_SYNC and changes nothing; the current one
 // applies the change, whose truncate must not trip over the write

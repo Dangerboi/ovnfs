@@ -153,7 +153,7 @@ func (cmd *tuneCmd) Run(c *cli) (err error) {
 	}
 	fmt.Fprintf(stdout, "\nBest measured balanced configuration: %s\n", paint(stdout, styleBold, report.Best.name()))
 	fmt.Fprintf(stdout, "No workload may regress more than %.0f%%; gains above 2x cannot dominate the score.\n", cmd.MaxRegression*100)
-	fmt.Fprintln(stdout, "NFS flushes stable writes and COMMIT, not standalone fsync calls; SMB on macOS has no hard links or durable handles.")
+	fmt.Fprintln(stdout, "With fsync, NFS flushes stable writes and COMMIT, not standalone fsync calls; SMB on macOS has no hard links or durable handles.")
 	fmt.Fprintf(stdout, "Apply proto=%s, memory=%s, nfs_io_size=%s to %s and restart this daemon?\n", report.Best.Proto, report.Best.Memory, report.Best.NFSIOSize, filepath.Join(home, ".o2", "ovnfs.yml"))
 	fmt.Fprintln(stdout, "A protocol or mount-option change forces remounting; finish active checkout jobs first.")
 	confirmed, err := confirmTune(c.ctx, os.Stdin, stderr)

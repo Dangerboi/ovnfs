@@ -4,9 +4,12 @@ import "fmt"
 
 const defaultNFSIOSize = 128 << 10
 
-// mountSettings controls native client mounts. A zero NFSIOSize uses the default.
+// mountSettings controls native client mounts and what the NFS server promises
+// them. A zero NFSIOSize uses the default. Without Sync, NFS stable writes and
+// COMMIT sync nothing (serve --fsync).
 type mountSettings struct {
 	Atime     bool
+	Sync      bool
 	NFSIOSize int
 	NFSNoIntr bool
 }

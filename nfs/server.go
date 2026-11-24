@@ -46,7 +46,11 @@ type Server struct {
 	// Concurrency bounds the calls of one connection answered at once; zero
 	// or one answers them one at a time, in order.
 	Concurrency int
-	Logf        func(format string, args ...any)
+	// NoSync acknowledges stable writes and COMMIT without syncing, and
+	// reports every write as committed so that clients send no COMMIT. A
+	// crash of the host or the server can then lose acknowledged data.
+	NoSync bool
+	Logf   func(format string, args ...any)
 	// Stats times the calls answered, by procedure (group "nfs"); nil times none.
 	Stats *stats.Recorder
 

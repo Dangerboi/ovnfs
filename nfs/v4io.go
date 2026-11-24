@@ -144,7 +144,9 @@ func (x *v4compound) write() status {
 	n, err := kept.WriteAt(f, data, int64(offset))
 	if err == nil {
 		x.changed(cur.id)
-		if stable != stable4Unstable {
+		if x.s.NoSync {
+			stable = stable4FileSync
+		} else if stable != stable4Unstable {
 			err = x.s.FS.SyncFile(cur.path, cur.id, gen, f)
 			stable = stable4FileSync
 		}
@@ -164,7 +166,7 @@ func (x *v4compound) write() status {
 }
 
 // commit answers COMMIT, syncing the whole file even when only a range
-// was requested.
+// was requested. With [Server.NoSync] it syncs nothing.
 func (x *v4compound) commit() status {
 	x.d.u64() // offset
 	x.d.u32() // count
@@ -175,13 +177,15 @@ func (x *v4compound) commit() status {
 	if s != stOK {
 		return s
 	}
-	var writer billy.File
-	if kept := x.s.v4.commitWriter(cur.id); kept != nil {
-		defer x.s.v4.release(kept)
-		writer = kept.f
-	}
-	if err := x.s.FS.SyncFile(cur.path, cur.id, x.handleGen(cur), writer); err != nil {
-		return statusOf(err)
+	if !x.s.NoSync {
+		var writer billy.File
+		if kept := x.s.v4.commitWriter(cur.id); kept != nil {
+			defer x.s.v4.release(kept)
+			writer = kept.f
+		}
+		if err := x.s.FS.SyncFile(cur.path, cur.id, x.handleGen(cur), writer); err != nil {
+			return statusOf(err)
+		}
 	}
 	x.e.fixed(x.s.verf[:])
 	return stOK

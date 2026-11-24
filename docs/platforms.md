@@ -81,12 +81,20 @@ them after 10 s idle instead of reopening a host file for every small write.
 Cached writers are keyed by file id and path, so renames reopen at the current
 path; the export's generation-aware handles preserve snapshot isolation.
 
-NFSv3 and NFSv4 mark `UNSTABLE` writes as buffered. `DATA_SYNC`, `FILE_SYNC`
-and `COMMIT` (including a byte-range `COMMIT`) flush the whole addressed file,
-not every buffered file. For a live upper this spills a memory file and
-syncs its data, identity metadata and the directories on its current path
-before replying. A failed barrier returns an NFS error, regardless of
-`serve --fsync`.
+With `serve --fsync`, NFSv3 and NFSv4 mark `UNSTABLE` writes as buffered, and
+`DATA_SYNC`, `FILE_SYNC` and `COMMIT` (including a byte-range `COMMIT`) flush
+the whole addressed file, not every buffered file. For a live upper this
+spills a memory file and syncs its data, identity metadata and the
+directories on its current path before replying. A failed barrier returns an
+NFS error.
+
+Without it (the default) the server syncs for none of them and reports every
+write as `FILE_SYNC`, so the client sends no COMMIT at all: the macOS client
+otherwise commits every written file when it is closed, which cost a build
+more daemon time than all its other calls together and spilled every small
+file the memory tier would have kept off the disk. A crash of the daemon or
+the host can then lose writes the client was told are stable, as it can lose
+any other recent change (see [persistence](internals.md#persistence)).
 
 A client can implement `fsync` of dirty data with these requests; NFS has
 no standalone file or directory `fsync` RPC. An application `fsync` that

@@ -403,7 +403,8 @@ const (
 )
 
 // write3 answers WRITE (section 3.3.7). An unstable write may stay buffered;
-// a stable write reaches stable storage before the reply.
+// a stable write reaches stable storage before the reply. With
+// [Server.NoSync] no write syncs and each is reported as FILE_SYNC.
 func (s *Server) write3(d *decoder, res *encoder) status {
 	id, gen, ok := d.fh(maxFH3)
 	off := d.u64()
@@ -433,14 +434,14 @@ func (s *Server) write3(d *decoder, res *encoder) status {
 	}
 	pre := attrsOf(id, info)
 	s.recallAttrs(id, pre.typ)
-	n, err := s.writeAt3(id, gen, p, data[:min(len(data), int(count))], int64(off), how != unstable3)
+	n, err := s.writeAt3(id, gen, p, data[:min(len(data), int(count))], int64(off), how != unstable3 && !s.NoSync)
 	s.recallAttrs(id, pre.typ)
 	if err != nil {
 		return statusOf(err)
 	}
 	s.wcc3(res, &pre, id, p)
 	res.u32(uint32(n))
-	if how != unstable3 {
+	if how != unstable3 || s.NoSync {
 		how = fileSync3
 	}
 	res.u32(how)
@@ -483,6 +484,7 @@ func (s *Server) writeAt3(id, gen uint64, p string, data []byte, off int64, stab
 
 // commit3 answers COMMIT (section 3.3.21), syncing the whole file even when
 // only a range was requested. A kept writer still works after a chmod.
+// With [Server.NoSync] it syncs nothing.
 func (s *Server) commit3(d *decoder, res *encoder) status {
 	id, gen, ok := d.fh(maxFH3)
 	d.u64() // offset
@@ -494,16 +496,18 @@ func (s *Server) commit3(d *decoder, res *encoder) status {
 	if st != stOK {
 		return st
 	}
-	flush := func(f billy.File) error { return s.FS.SyncFile(p, id, gen, f) }
-	found, err := s.v3.kept.With(keptKey{id: id, path: p}, flush)
-	if !found {
-		found, err = s.v3.kept.With(keptKey{id: id}, flush)
-	}
-	if !found {
-		err = flush(nil)
-	}
-	if err != nil {
-		return statusOf(err)
+	if !s.NoSync {
+		flush := func(f billy.File) error { return s.FS.SyncFile(p, id, gen, f) }
+		found, err := s.v3.kept.With(keptKey{id: id, path: p}, flush)
+		if !found {
+			found, err = s.v3.kept.With(keptKey{id: id}, flush)
+		}
+		if !found {
+			err = flush(nil)
+		}
+		if err != nil {
+			return statusOf(err)
+		}
 	}
 	s.wcc3(res, nil, id, p)
 	res.fixed(s.verf[:])

@@ -123,7 +123,7 @@ type serveCmd struct {
 	Proto      string   `help:"File server protocol: nfs, smb, fuse or winfsp." default:"${default_proto}" enum:"nfs,smb,fuse,winfsp"`
 	Listen     string   `help:"File server address; defaults to a free local port or a Unix socket for NFS on macOS."`
 	Memory     byteSize `help:"Memory budget for small written files; 0 writes every file to disk." default:"${memory_default}"`
-	Fsync      bool     `help:"Spill and sync memory files on handle fsync. NFS stable writes and COMMIT always flush." default:"${fsync_default}"`
+	Fsync      bool     `help:"Spill and sync memory files on handle fsync, and sync files on NFS stable writes and COMMIT. Off, an fsync is no durability barrier." default:"${fsync_default}"`
 	BlobCache  byteSize `help:"Memory budget for small content-addressed blobs; 0 disables." default:"${blob_cache_default}"`
 	Atime      bool     `help:"Allow access time updates on the mount." default:"${atime_default}"`
 	NFSIOSize  byteSize `name:"nfs-io-size" help:"NFS read/write transfer size (power of two, 4K to 1M)." default:"${nfs_io_size_default}"`
@@ -184,7 +184,7 @@ func (cmd *serveCmd) Run(c *cli) (err error) {
 	if cmd.NFSIOSize > 1<<20 {
 		return fmt.Errorf("NFS I/O size must not exceed 1 MiB")
 	}
-	settings := mountSettings{Atime: cmd.Atime, NFSIOSize: int(cmd.NFSIOSize), NFSNoIntr: cmd.NFSNoIntr}
+	settings := mountSettings{Atime: cmd.Atime, Sync: cmd.Fsync, NFSIOSize: int(cmd.NFSIOSize), NFSNoIntr: cmd.NFSNoIntr}
 	if err := settings.validate(); err != nil {
 		return err
 	}
@@ -611,7 +611,7 @@ func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, st
 		smbStarted(s)
 		go func() { served <- fmt.Errorf("smb serve: %w", s.Serve(files)) }()
 	} else {
-		go func() { served <- fmt.Errorf("nfs serve: %w", serveNFS(files, e, reg.Stats())) }()
+		go func() { served <- fmt.Errorf("nfs serve: %w", serveNFS(files, e, reg.Stats(), settings.Sync)) }()
 	}
 	if err = attach(proto, listener.Addr(), mount, user, password, settings); err != nil {
 		files.cut()
@@ -634,7 +634,7 @@ func mountLocal(reg *checkout.Registry, e *export.Export, state, mount string, s
 		return nil, fmt.Errorf("persist listen: %w", err)
 	}
 	stopped := make(chan error, 1)
-	go func() { stopped <- serveNFS(files, e, reg.Stats()) }()
+	go func() { stopped <- serveNFS(files, e, reg.Stats(), settings.Sync) }()
 	if err = attach("nfs", l.Addr(), mount, "", "", settings); err != nil {
 		files.cut()
 		<-stopped

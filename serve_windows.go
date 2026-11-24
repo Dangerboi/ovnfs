@@ -11,7 +11,7 @@ import (
 )
 
 // serveNFS rejects a protocol unavailable on Windows.
-func serveNFS(net.Listener, *export.Export, *stats.Recorder) error {
+func serveNFS(net.Listener, *export.Export, *stats.Recorder, bool) error {
 	return fmt.Errorf("NFS serving unsupported on Windows; use -proto smb")
 }
 
