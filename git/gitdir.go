@@ -59,7 +59,9 @@ func realPath(p string) string {
 
 // MakeGitdir writes a checkout's private git directory from the repository's current
 // HEAD, refs and config, the captured index, and a link to the shared objects. It
-// runs no git process: the config is edited as it is copied.
+// runs no git process: the config is edited as it is copied. The repository's
+// files are copied, not cloned ([clone.CopyTree]): the folder watcher would count
+// a clone of one as a change of the repository's git state.
 func (r *Repo) MakeGitdir(gitdir, objects, index string) error {
 	if err := os.Mkdir(gitdir, 0o755); err != nil {
 		return err
@@ -95,7 +97,7 @@ func (r *Repo) MakeGitdir(gitdir, objects, index string) error {
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
-		err := clone.Tree(c.src, dst)
+		err := clone.CopyTree(c.src, dst)
 		if err != nil && (c.required || !errors.Is(err, os.ErrNotExist)) {
 			return err
 		}
@@ -384,7 +386,7 @@ func emptyIndex(name string) error {
 	return os.WriteFile(name, append([]byte(header), checksum[:]...), 0o600)
 }
 
-// copyFiles clones the files and symlinks below directory src to the new directory
+// copyFiles copies the files and symlinks below directory src to the new directory
 // dst, creating only the directories that lead to them.
 func copyFiles(src, dst string) error {
 	if err := os.MkdirAll(dst, 0o755); err != nil {
@@ -406,6 +408,6 @@ func copyFiles(src, dst string) error {
 			}
 			made[dir] = true
 		}
-		return clone.Tree(p, target)
+		return clone.CopyTree(p, target)
 	})
 }

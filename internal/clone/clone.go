@@ -9,7 +9,9 @@
 //
 // Reflink alone reports errors.ErrUnsupported, leaving dst absent, where blocks
 // cannot be shared (another volume, a filesystem without cloning, another
-// platform), for callers with a cheaper fallback than a plain copy.
+// platform), for callers with a cheaper fallback than a plain copy. CopyTree
+// never clones, for sources an FSEvents watcher observes: APFS reports the
+// source of a clone as changed (kFSEventStreamEventFlagItemCloned).
 package clone
 
 import (
@@ -61,7 +63,12 @@ func FD(in *os.File, dst string, mode os.FileMode) error {
 // ([hostfile.Linked]) and copies as one ([hostfile.Symlink]).
 func Tree(src, dst string) error { return hierarchy(src, dst, walk{}) }
 
-// hierarchy clones src to dst in one call where the volume can, else with w.
+// CopyTree copies src to dst as [Tree] does, but byte by byte: src sees only
+// reads, which no file watcher reports.
+func CopyTree(src, dst string) error { return hierarchy(src, dst, walk{copying: true}) }
+
+// hierarchy clones src to dst in one call where the volume can, else with w;
+// a w already copying never clones.
 func hierarchy(src, dst string, w walk) error {
 	info, err := hostfile.Lstat(src)
 	if err != nil {
@@ -70,8 +77,10 @@ func hierarchy(src, dst string, w walk) error {
 	if !info.Mode().IsRegular() && !info.IsDir() && info.Mode()&fs.ModeSymlink == 0 {
 		return nil
 	}
-	if cloned, err := cloneHierarchy(src, dst, info); cloned || err != nil {
-		return err
+	if !w.copying {
+		if cloned, err := cloneHierarchy(src, dst, info); cloned || err != nil {
+			return err
+		}
 	}
 	return w.tree(src, dst, info)
 }

@@ -244,7 +244,9 @@ func (w *walker) copyRepo(ctx context.Context, repo *git.Repo, p string) (Repo, 
 		return Repo{}, err
 	}
 	r.Index = filepath.Join(dir, "index")
-	if err := clone.File(repo.IndexPath(), r.Index); err != nil {
+	// Copied, not cloned: the folder watcher would count a clone of the index
+	// as a change of the repository's git state.
+	if err := clone.CopyTree(repo.IndexPath(), r.Index); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return Repo{}, err
 		}
