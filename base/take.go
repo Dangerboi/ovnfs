@@ -148,7 +148,7 @@ func takeCapture(ctx context.Context, c Config, set rules.Set, res *source.Resul
 				var ok bool
 				if tree, ok = revisions[take.Revision]; !ok {
 					var err error
-					if tree, err = treeFiles(take.Revision.Entries, work, root, git.AttributeOptions{Source: take.Revision.Commit}, fork); err != nil {
+					if tree, err = treeFiles(take.Revision.Entries, work, root, git.AttributeOptions{Source: take.Revision.Commit}, fork, nil); err != nil {
 						return err
 					}
 					revisions[take.Revision] = tree
@@ -172,7 +172,7 @@ func takeCapture(ctx context.Context, c Config, set rules.Set, res *source.Resul
 							attrs.Index = &captured
 						}
 					}
-					files, err := treeFiles(entries, work, root, attrs, fork)
+					files, err := treeFiles(entries, work, root, attrs, fork, nil)
 					if err != nil {
 						return err
 					}
@@ -287,8 +287,9 @@ type gitFiles struct {
 // object unread. One whose pointer git-lfs would rewrite shows the fork time
 // and is never seeded (seedRevisionIndex), so git reads it and reports the
 // rewrite. A file the work tree holds unchanged keeps its stat data; other
-// content presents its blob's size.
-func treeFiles(entries []git.TreeEntry, work source.Result, repo *git.Repo, attrs git.AttributeOptions, fork time.Time) (gitFiles, error) {
+// content presents its blob's size. When pointers is not nil, it also receives
+// the parsed LFS pointers so their local objects can be retained.
+func treeFiles(entries []git.TreeEntry, work source.Result, repo *git.Repo, attrs git.AttributeOptions, fork time.Time, pointers map[string]git.LFSPointer) (gitFiles, error) {
 	lfs, err := newLFSFinder(repo, attrs)
 	if err != nil {
 		return gitFiles{}, err
@@ -311,6 +312,9 @@ func treeFiles(entries []git.TreeEntry, work source.Result, repo *git.Repo, attr
 				t.info[e.Path] = source.Info{Size: pointer.Size, Mtime: lfsMtime(fork)}
 			}
 			t.lfs[e.Path] = true
+			if pointers != nil {
+				pointers[e.Path] = pointer
+			}
 		case work.Files[e.Path] == f:
 			t.info[e.Path] = work.Info[e.Path]
 		default:

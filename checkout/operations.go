@@ -236,7 +236,15 @@ func (r *Registry) capture(ctx context.Context, root string, m manifest.Manifest
 	gs, err := gitSourceOf(view)
 	gs.rev = revision
 	if err == nil && gs.repo != nil {
-		err = gs.repo.PrepareObjects(r.objectsPath(id, ""))
+		if view.Meta().PrivateRevision {
+			gs.template = r.templatePath(id)
+			if err = r.makeGitdirs(gs.template, id, gs); err == nil {
+				err = gs.rev.SetHEAD(gs.template)
+				gs.rev = nil
+			}
+		} else {
+			err = gs.repo.PrepareObjects(r.objectsPath(id, ""))
+		}
 		for _, sub := range gs.modules {
 			if err == nil {
 				err = sub.repo.PrepareObjects(r.objectsPath(id, sub.Module))
@@ -385,9 +393,9 @@ func (r *Registry) publishBase(ctx context.Context, name, id string, b *baseReco
 // newOverlappingMount handles New on a folder that overlaps the daemon's own
 // mount, reporting overlaps false for any other folder. A base on such a folder
 // would be served by reading through the mount from the mount's own request
-// handlers, which can deadlock the whole mount, so a checkout's root forks that
-// checkout instead; the mount root, folders below a checkout's root and folders
-// holding the mount fail.
+// handlers, which can deadlock the whole mount. A checkout's root forks it by
+// default; with --rev, even a subdirectory selects the checkout's private Git
+// state and captures its original host folder.
 func (r *Registry) newOverlappingMount(ctx context.Context, dir string, args api.NewArgs) (reply api.NewReply, overlaps bool, err error) {
 	rel, inMount, holds := r.mountOverlap(dir)
 	switch {
@@ -400,16 +408,65 @@ func (r *Registry) newOverlappingMount(ctx context.Context, dir string, args api
 	switch {
 	case rel == ".":
 		return api.NewReply{}, true, failure("invalid", "%s is the checkout mount; open a folder or fork a checkout", dir)
+	case args.Rev != "":
+		reply, err := r.newCheckoutRevision(ctx, name, args)
+		return reply, true, err
 	case sub != "":
 		return api.NewReply{}, true, failure("invalid", "%s is inside checkout %s; `ovnfs fork %s` copies the whole checkout", dir, name, name)
-	case args.Rev != "" || len(args.Take) != 0 || len(args.Rules) != 0:
-		return api.NewReply{}, true, failure("invalid", "%s is checkout %s, which new forks; --rev, --take and --rule apply only to folders", dir, name)
+	case len(args.Take) != 0 || len(args.Rules) != 0:
+		return api.NewReply{}, true, failure("invalid", "%s is checkout %s, which new forks; use the original source folder with --take or --rule", dir, name)
 	}
 	f, err := r.Fork(ctx, api.ForkArgs{Checkout: name, Name: args.Name})
 	if err != nil {
 		return api.NewReply{}, true, err
 	}
 	return api.NewReply{Checkout: f.Checkout, Warnings: append([]string{fmt.Sprintf("%s is checkout %s: forked it at %s", dir, name, f.Snapshot.ID)}, f.Warnings...)}, true, nil
+}
+
+// newCheckoutRevision uses the parent's private objects only until capture has
+// imported the commit. The shared freeze lock keeps removal from deleting them.
+func (r *Registry) newCheckoutRevision(ctx context.Context, name string, args api.NewArgs) (api.NewReply, error) {
+	h, err := r.lookupCheckout(name)
+	if err != nil {
+		return api.NewReply{}, err
+	}
+	r.mu.RLock()
+	meta := h.base.view.Meta()
+	r.mu.RUnlock()
+	root := meta.Dir
+	if meta.Remote != nil {
+		return api.NewReply{}, failure("invalid", "checkout %s has a remote source; run new --rev on the original machine, or use `ovnfs fork %s` to copy the current checkout", name, name)
+	}
+	if len(args.Take) != 0 || len(args.Rules) != 0 {
+		return api.NewReply{}, failure("invalid", "cannot combine checkout-local --rev with --take or --rule; use the original folder %q for overrides", root)
+	}
+	if _, inMount, holds := r.mountOverlap(root); inMount || holds {
+		return api.NewReply{}, failure("invalid", "checkout %s's source folder %q now overlaps the checkout mount; restore the original source folder or use `ovnfs fork %s`", name, root, name)
+	}
+	h.freeze.RLock()
+	defer h.freeze.RUnlock()
+	if h.retired.Load() {
+		return api.NewReply{}, failure("not_found", "no checkout %s", name)
+	}
+	if h.base.view.Meta().Dir != root {
+		return api.NewReply{}, failure("conflict", "checkout %s's source changed; retry new --rev", name)
+	}
+	if !h.meta.Git {
+		return api.NewReply{}, failure("invalid", "checkout %s has no private Git repository; omit --rev to fork it", name)
+	}
+	if !git.IsRoot(root) {
+		return api.NewReply{}, failure("invalid", "checkout %s's source folder %q no longer has its Git repository; restore it or use `ovnfs fork %s`", name, root, name)
+	}
+	revision, err := h.base.view.CheckoutRevision(r.gitdirPath(h.meta.dir()), args.Rev)
+	if err != nil {
+		return api.NewReply{}, failure("invalid", "cannot resolve revision %q in checkout %s: %v; if it exists in the source folder, use `ovnfs new --rev %q %q`", args.Rev, name, err, args.Rev, root)
+	}
+	m, err := manifest.Load(root, r.config.UserHome, nil)
+	if err != nil {
+		return api.NewReply{}, failure("invalid", "%v", err)
+	}
+	reply, _, err := r.capture(ctx, root, m, args.Name, revision, nil)
+	return reply, err
 }
 
 // underMount returns dir relative to the daemon's mount when dir is the mount or below it.

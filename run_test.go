@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+
+	"github.com/stencil-hq/ovnfs/api"
 )
 
 // TestRunRelativeDir checks root, nested and outside callers without prefix confusion.
@@ -52,6 +54,29 @@ func TestRunRelativeDirSymlink(t *testing.T) {
 	}
 	if got := runRelativeDir(root, filepath.Join(link, "nested")); got != "nested" {
 		t.Fatalf("relative directory = %q, want nested", got)
+	}
+}
+
+func TestRunWorkingDirNestedRevision(t *testing.T) {
+	mount := t.TempDir()
+	parent := filepath.Join(mount, "parent")
+	nested := filepath.Join("src", "with spaces")
+	cwd := filepath.Join(parent, nested)
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "linked-parent")
+	if err := os.Symlink(parent, link); err != nil {
+		t.Fatal(err)
+	}
+	child := api.Checkout{Path: filepath.Join(mount, "child"), Source: t.TempDir()}
+	for _, input := range []string{parent, cwd, filepath.Join(link, nested)} {
+		if got := runWorkingDir(api.NewArgs{Dir: input, Rev: "HEAD"}, child, cwd); got != filepath.Join(child.Path, nested) {
+			t.Errorf("run from %s: directory = %q, want %s in checkout", input, got, nested)
+		}
+	}
+	if got := runWorkingDir(api.NewArgs{Dir: parent, Rev: "HEAD"}, child, child.Source); got != child.Path {
+		t.Fatalf("run from outside the selected checkout: directory = %q, want %s", got, child.Path)
 	}
 }
 

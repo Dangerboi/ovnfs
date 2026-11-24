@@ -2,6 +2,7 @@ package base
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"os"
 	"path"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stencil-hq/ovnfs/git"
+	"github.com/stencil-hq/ovnfs/internal/clone"
 	"github.com/stencil-hq/ovnfs/rules"
 	"github.com/stencil-hq/ovnfs/source"
 	"github.com/stencil-hq/ovnfs/store"
@@ -72,6 +74,7 @@ type revisionProjection struct {
 	hidden  map[string]int       // deciding root -> rule position
 	skipped map[string]bool      // omitted index entries, including gitlinks
 	ignores map[string]store.OID // hidden .gitignore blobs still used to classify takes
+	private bool                 // has its own root Git objects, shared with its checkouts
 }
 
 func (pr *revisionProjection) match(set rules.Set, p string, facts rules.Facts) rules.Class {
@@ -139,11 +142,26 @@ func (v *revisionView) project(set rules.Set, domains *source.Domains) revisionP
 // revisionIndex names the private index of a revision base in its state directory.
 const revisionIndex = "revision-index"
 
+// revisionObjects is the root object directory that the checkout's Git dir
+// also links to.
+func revisionObjects(c Config) string { return filepath.Join(c.StateDir, "objects") }
+
+// CheckoutRevision resolves spec against the checkout's Git directory, and
+// records where this base keeps LFS objects retained from an earlier capture.
+func (b *Base) CheckoutRevision(gitdir, spec string) (*git.Revision, error) {
+	return git.ResolveCheckoutRevision(gitdir, spec, filepath.Join(b.config.StateDir, lfsDir))
+}
+
 // reviseCapture substitutes tree metadata, not a materialized checkout. The
 // capture's stat identities remain usable only for content identical to REV.
 // LFS pointers, under REV's attributes, present their objects (see lfsFile).
 // Its index has no stat data yet: seedRevisionIndex adds it once takes are done.
 func reviseCapture(ctx context.Context, c Config, res *source.Result, revision *git.Revision, set rules.Set, fork time.Time, taking bool) (revisionProjection, error) {
+	repo := res.Domains.Repo("")
+	private, err := revision.PreparePrivateObjects(ctx, repo, revisionObjects(c))
+	if err != nil {
+		return revisionProjection{}, err
+	}
 	index := filepath.Join(c.StateDir, revisionIndex)
 	if err := revision.WriteIndex(ctx, index, nil, nil); err != nil {
 		return revisionProjection{}, err
@@ -153,13 +171,20 @@ func reviseCapture(ctx context.Context, c Config, res *source.Result, revision *
 	if err != nil {
 		return revisionProjection{}, err
 	}
-	repo := domains.Repo("")
+	repo = domains.Repo("")
+	if private {
+		repo = repo.WithObjectDirectory(revisionObjects(c))
+	}
 	objects, err := repo.Objects()
 	if err != nil {
 		return revisionProjection{}, err
 	}
 	defer objects.Close()
-	tree, err := treeFiles(revision.Entries, *res, repo, git.AttributeOptions{Source: revision.Commit}, fork)
+	var privateLFS map[string]git.LFSPointer
+	if private {
+		privateLFS = make(map[string]git.LFSPointer)
+	}
+	tree, err := treeFiles(revision.Entries, *res, repo, git.AttributeOptions{Source: revision.Commit}, fork, privateLFS)
 	if err != nil {
 		return revisionProjection{}, err
 	}
@@ -174,6 +199,7 @@ func reviseCapture(ctx context.Context, c Config, res *source.Result, revision *
 		}
 	}
 	projection := view.project(set, domains)
+	projection.private = private
 	// Gitlinks start empty in revision checkouts. Their contents belong to the
 	// submodule and must not be judged by the superproject's ignore rules.
 	gitlinks := map[string]bool{}
@@ -354,9 +380,45 @@ func reviseCapture(ctx context.Context, c Config, res *source.Result, revision *
 		delete(info, p)
 		delete(tree.lfs, p)
 	}
+	for p, pointer := range privateLFS {
+		if tree.lfs[p] {
+			if err := retainPrivateLFS(c, revision, pointer); err != nil {
+				return revisionProjection{}, err
+			}
+		}
+	}
 	res.Files, res.Info, res.Roots, res.Repos, res.Domains, res.LFS = files, info, roots, repos, domains, tree.lfs
 	res.Tree, err = c.Store.Build(files)
 	return projection, err
+}
+
+// retainPrivateLFS keeps locally stored objects that could otherwise disappear
+// with the checkout that committed their pointer. Objects absent there still
+// use the ordinary host LFS storage or smudge path.
+func retainPrivateLFS(c Config, revision *git.Revision, pointer git.LFSPointer) error {
+	dir := filepath.Join(c.StateDir, lfsDir)
+	dst := filepath.Join(dir, pointer.OID)
+	if _, err := os.Stat(dst); err == nil {
+		return nil // several retained paths may name the same object
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	sources, err := revision.PrivateLFSPaths(pointer.OID)
+	if err != nil {
+		return err
+	}
+	for _, src := range sources {
+		f, ok := openSized(src, pointer.Size)
+		if !ok {
+			continue
+		}
+		defer f.Close()
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		return clone.FD(f, dst, 0o600)
+	}
+	return nil
 }
 
 // seedRevisionIndex rewrites the revision index with the stat data the view

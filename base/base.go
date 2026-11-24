@@ -42,6 +42,9 @@ type Meta struct {
 	// it (CreateRevision). Its difference from the folder is what the checkout
 	// was opened to leave out, not what the folder changed since.
 	Chosen bool `json:"chosen,omitempty"`
+	// PrivateRevision means the root repository also reads Git objects owned
+	// by this base, imported from the checkout that supplied the revision.
+	PrivateRevision bool `json:"private_revision,omitempty"`
 	// RevisionHidden records hidden roots and their rule positions in the frozen lock.
 	RevisionHidden map[string]int `json:"revision_hidden,omitempty"`
 }
@@ -148,7 +151,7 @@ func CreateRevision(ctx context.Context, c Config, o source.Options, revision *g
 		b, err := CreateCaptured(c, res, fork, res.ReuseKey())
 		return b, warnings, err
 	}
-	b, err := create(c, Meta{ID: c.ID, Dir: res.Root, ForkTime: fork, Tree: res.Tree, Chosen: true, RevisionHidden: projection.hidden}, &res)
+	b, err := create(c, Meta{ID: c.ID, Dir: res.Root, ForkTime: fork, Tree: res.Tree, Chosen: true, PrivateRevision: projection.private, RevisionHidden: projection.hidden}, &res)
 	return b, warnings, err
 }
 
@@ -386,6 +389,9 @@ func (b *Base) repoBlob(top string, repo *git.Repo, id store.OID) ([]byte, error
 			if repo, err = git.Open(top); err != nil {
 				return nil, err
 			}
+		}
+		if b.meta.PrivateRevision && top == b.meta.Dir {
+			repo = repo.WithObjectDirectory(revisionObjects(b.config))
 		}
 		if objects, err = repo.Objects(); err != nil {
 			return nil, err

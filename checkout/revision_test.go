@@ -405,6 +405,116 @@ func TestNewHistoricalRevision(t *testing.T) {
 	}
 }
 
+func TestNewCheckoutRevisionOwnsParentCommit(t *testing.T) {
+	t.Setenv("GIT_LFS_SKIP_SMUDGE", "")
+	ctx := context.Background()
+	f := newFixture(t)
+	dir := revisionRepo(t)
+	gitRun(t, dir, "config", "filter.lfs.smudge", "git-lfs smudge -- %f")
+	host := gitRun(t, dir, "rev-parse", "HEAD")
+	// A revision capture is not retained by the warm folder cache.
+	opened, err := f.reg.New(ctx, api.NewArgs{Dir: dir, Name: "parent", Rev: "HEAD"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := opened.Checkout
+	work := f.export(parent.Name)
+	gitRun(t, work, "checkout", "-qb", "private")
+	write(t, filepath.Join(work, "tracked.txt"), "parent commit\n")
+	write(t, filepath.Join(work, "sub", "private.txt"), "committed private file\n")
+	lfs := "object kept only by the parent\n"
+	oid := fmt.Sprintf("%x", sha256.Sum256([]byte(lfs)))
+	write(t, filepath.Join(work, ".gitattributes"), "*.bin filter=lfs\n")
+	write(t, filepath.Join(work, "sub", "large.bin"), fmt.Sprintf("version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %d\n", oid, len(lfs)))
+	write(t, filepath.Join(f.gitdir(parent.Name), "lfs", "objects", oid[:2], oid[2:4], oid), lfs)
+	gitRun(t, work, "add", "--all")
+	gitRun(t, work, "commit", "-qm", "private revision")
+	commit := gitRun(t, work, "rev-parse", "HEAD")
+	gitRun(t, work, "repack", "-a", "-d", "-l")
+	write(t, filepath.Join(work, "tracked.txt"), "dirty parent file\n")
+	write(t, filepath.Join(work, "staged.txt"), "staged parent file\n")
+	gitRun(t, work, "add", "staged.txt")
+	f.put(parent.Name, "tracked.txt", "dirty mounted file\n")
+	f.put(parent.Name, "parent.log", "ignored mounted file\n")
+	write(t, filepath.Join(dir, "host.log"), "ignored host file\n")
+
+	// No actual kernel mount is needed: even a nested spelling resolves Git
+	// from the parent state and the capture's filesystem from the host.
+	child, err := f.reg.New(ctx, api.NewArgs{Dir: filepath.Join(parent.Path, "sub"), Name: "child", Rev: "private"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := child.Checkout; c.Source != parent.Source || c.Parent != "" || c.Base == parent.Base || child.Capture == nil || child.Capture.Root != parent.Source {
+		t.Fatalf("nested revision = %+v, want an independent capture of %s", child, parent.Source)
+	}
+	if got := gitRun(t, dir, "rev-parse", "HEAD"); got != host {
+		t.Fatalf("host HEAD = %q, want %s", got, host)
+	}
+	if got := gitRun(t, dir, "for-each-ref", "--format=%(refname)", "refs/heads"); got != "refs/heads/main" {
+		t.Fatalf("host refs = %q, want only main", got)
+	}
+	if err := f.reg.Rm(ctx, api.RmArgs{Checkout: parent.Name}); err != nil {
+		t.Fatal(err)
+	}
+	parentObjects := f.reg.objectsPath(parent.Base, "")
+	eventually(t, "parent base's Git objects were not collected", func() bool { return !exists(parentObjects) })
+	if err := f.reg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.open()
+	for p, want := range map[string]string{
+		"tracked.txt": "parent commit\n", "sub/private.txt": "committed private file\n", "sub/large.bin": lfs,
+		"staged.txt": "<absent>", "parent.log": "<absent>", "host.log": "ignored host file\n",
+	} {
+		if got := f.read("child", p); got != want {
+			t.Errorf("%s = %q, want %q", p, got, want)
+		}
+	}
+	gitdir := f.gitdir("child")
+	if got := gitRun(t, dir, "--git-dir", gitdir, "symbolic-ref", "HEAD"); got != "refs/heads/private" {
+		t.Fatalf("child HEAD points to %q, want private", got)
+	}
+	if got := gitRun(t, dir, "--git-dir", gitdir, "rev-parse", "HEAD", "HEAD^"); got != commit+"\n"+host {
+		t.Fatalf("child history = %q, want %s followed by %s", got, commit, host)
+	}
+	if got := gitRun(t, dir, "--git-dir", gitdir, "show", "HEAD:sub/private.txt"); got != "committed private file" {
+		t.Fatalf("child Git blob = %q", got)
+	}
+	if twin, err := f.reg.New(ctx, api.NewArgs{Base: child.Checkout.Base, Name: "twin"}); err != nil || twin.Checkout.Base != child.Checkout.Base {
+		t.Fatalf("new on persisted revision capture = %+v, %v", twin, err)
+	}
+	if got := f.read("twin", "sub/private.txt"); got != "committed private file\n" {
+		t.Fatalf("twin Git blob = %q", got)
+	}
+	if got := gitRun(t, dir, "--git-dir", f.gitdir("twin"), "rev-parse", "HEAD"); got != commit {
+		t.Fatalf("twin HEAD = %q, want %s", got, commit)
+	}
+	if _, err := f.reg.New(ctx, api.NewArgs{Dir: child.Checkout.Path, Name: "grandchild", Rev: "HEAD"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.read("grandchild", "sub/large.bin"); got != lfs {
+		t.Fatalf("grandchild LFS object = %q, want %q", got, lfs)
+	}
+}
+
+func TestNewCheckoutRevisionRejectsMixedFlags(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	parent := f.newCheckout(revisionRepo(t), "parent").Checkout
+	for _, args := range []api.NewArgs{
+		{Dir: parent.Path, Rev: "HEAD", Take: []string{".:tracked.txt"}},
+		{Dir: filepath.Join(parent.Path, "sub"), Rev: "HEAD", Rules: []string{"hidden tracked.txt"}},
+	} {
+		_, err := f.reg.New(ctx, args)
+		if e, ok := err.(*Error); !ok || e.Code != "invalid" || !strings.Contains(e.Message, parent.Source) {
+			t.Errorf("nested new %+v: %v, want source-folder guidance", args, err)
+		}
+	}
+	if got := f.ls(); len(got.Checkouts) != 1 || len(got.Snapshots) != 0 {
+		t.Fatalf("rejected options created state: %+v", got)
+	}
+}
+
 func TestRevisionErrorsLeaveNoCheckout(t *testing.T) {
 	f := newFixture(t)
 	repo := revisionRepo(t)

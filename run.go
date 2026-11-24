@@ -111,13 +111,22 @@ func (run *runCmd) Run(c *cli) error {
 		}
 	}()
 	cmd := exec.Command(o.command[0], o.command[1:]...)
-	cmd.Dir = filepath.Join(r.Checkout.Path, runRelativeDir(r.Checkout.Source, cwd))
+	cmd.Dir = runWorkingDir(o.new, r.Checkout, cwd)
 	cmd.Env = append(os.Environ(), "OVNFS_CHECKOUT="+r.Checkout.Name)
 	return runChild(cmd, signals)
 }
 
 // runRemote retains the local and remote checkouts so changes can later be pulled back.
 func runRemote(c *cli, o runOptions, cwd string, signals <-chan os.Signal) error {
+	if o.new.Rev != "" {
+		st, err := call[api.Status](c, "status", struct{}{})
+		if err != nil {
+			return err
+		}
+		if runCheckoutRoot(st.Mount, o.new.Dir) != "" {
+			return errors.New("run --rev from a checkout cannot be combined with --on; omit --on, or run from the original source folder using a revision available there")
+		}
+	}
 	root, err := source.Resolve(o.new.Dir)
 	if err != nil {
 		return err
@@ -143,19 +152,62 @@ func runRemote(c *cli, o runOptions, cwd string, signals <-chan os.Signal) error
 	return runChild(cmd, signals)
 }
 
+// runWorkingDir uses the input checkout's root for a nested revision, even
+// though the reply names the original host source folder.
+func runWorkingDir(a api.NewArgs, opened api.Checkout, cwd string) string {
+	root := opened.Source
+	if a.Rev != "" {
+		if parent := runCheckoutRoot(filepath.Dir(opened.Path), a.Dir); parent != "" {
+			root = parent
+		}
+	}
+	return filepath.Join(opened.Path, runRelativeDir(root, cwd))
+}
+
+func runCheckoutRoot(mount, dir string) string {
+	if rel, ok := runPathFromAncestor(mount, dir); ok && rel != "." {
+		name, _, _ := strings.Cut(rel, string(filepath.Separator))
+		return filepath.Join(mount, name)
+	}
+	return ""
+}
+
 // runRelativeDir preserves the caller's subdirectory only when it is inside the source.
 func runRelativeDir(root, cwd string) string {
+	if rel, ok := runPathFromAncestor(root, cwd); ok {
+		return rel
+	}
+	return "."
+}
+
+// runPathFromAncestor also recognizes alternate mounted path spellings on a
+// case-insensitive volume or through a bind mount.
+func runPathFromAncestor(root, dir string) (string, bool) {
+	if !filepath.IsAbs(root) || !filepath.IsAbs(dir) {
+		return "", false
+	}
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
 		root = resolved
 	}
-	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
-		cwd = resolved
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
 	}
-	rel, err := filepath.Rel(root, cwd)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "."
+	if rel, err := filepath.Rel(root, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return rel, true
 	}
-	return rel
+	want, err := os.Stat(root)
+	if err != nil {
+		return "", false
+	}
+	for here := dir; ; here = filepath.Dir(here) {
+		if info, err := os.Stat(here); err == nil && os.SameFile(info, want) {
+			rel, err := filepath.Rel(here, dir)
+			return rel, err == nil
+		}
+		if here == filepath.Dir(here) {
+			return "", false
+		}
+	}
 }
 
 // runLaneName keeps a folder's remote name stable across fresh captures.

@@ -2,11 +2,14 @@ package git
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/stencil-hq/ovnfs/git/internal/fetch"
 	"github.com/stencil-hq/ovnfs/git/internal/index"
 	"github.com/stencil-hq/ovnfs/git/internal/object"
 	"github.com/stencil-hq/ovnfs/git/internal/rev"
@@ -15,14 +18,28 @@ import (
 // Revision is a commit resolved before a checkout is created. Branch is nonempty
 // only when the requested revision names a local branch, not HEAD or a tag.
 type Revision struct {
-	Commit, Branch string
-	Entries        []TreeEntry
-	repo           *Repo
+	Commit, Branch  string
+	Entries         []TreeEntry
+	repo            *Repo
+	private         *Repo
+	privateLFSCache string
+	shallow         []object.ID
 }
 
 // ResolveRevision validates spec, any git revision naming a commit, without
 // changing the repository.
 func (r *Repo) ResolveRevision(ctx context.Context, spec string) (*Revision, error) {
+	v, err := r.resolveRevision(spec)
+	if err != nil {
+		return nil, err
+	}
+	if v.Entries, err = r.lsTree(ctx, v.Commit, true); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+func (r *Repo) resolveRevision(spec string) (*Revision, error) {
 	v := &Revision{repo: r}
 	err := r.session(func(s *rev.Source) error {
 		id, err := rev.Resolve(s, spec+"^{commit}", rev.Options{EndOfOptions: true})
@@ -42,10 +59,88 @@ func (r *Repo) ResolveRevision(ctx context.Context, spec string) (*Revision, err
 	if err != nil {
 		return nil, err
 	}
-	if v.Entries, err = r.lsTree(ctx, v.Commit, true); err != nil {
+	return v, nil
+}
+
+// ResolveCheckoutRevision reads a checkout's private Git state directly,
+// without discovering a repository through the mounted checkout. lfsCache is
+// the capture's cache of LFS objects it has already retained.
+func ResolveCheckoutRevision(gitdir, spec, lfsCache string) (*Revision, error) {
+	r, err := OpenPrivate(gitdir)
+	if err != nil {
 		return nil, err
 	}
-	return v, nil
+	v, err := r.resolveRevision(spec)
+	if err == nil {
+		v.private = r
+		v.privateLFSCache = lfsCache
+	}
+	return v, err
+}
+
+// PreparePrivateObjects imports the selected private revision's history into
+// a new base's objects, returning false for a revision from the source folder.
+// The new base borrows the host repository's objects, never the parent's.
+func (v *Revision) PreparePrivateObjects(ctx context.Context, host *Repo, dir string) (bool, error) {
+	if v.private == nil {
+		return false, nil
+	}
+	if host == nil {
+		return false, errors.New("the checkout's source folder no longer has its Git repository")
+	}
+	if host.repo.Format != v.repo.repo.Format {
+		return false, errors.New("the checkout and its source folder use different Git object formats")
+	}
+	if err := host.PrepareObjects(dir); err != nil {
+		return false, err
+	}
+	src, err := v.private.repo.OpenDB()
+	if err != nil {
+		return false, err
+	}
+	defer src.Close()
+	dst, err := object.Open(dir, host.repo.Format)
+	if err != nil {
+		return false, err
+	}
+	defer dst.Close()
+	id, err := object.ParseIDFormat(src.Format(), v.Commit)
+	if err != nil {
+		return false, err
+	}
+	shallow, err := fetch.ReadShallow(v.private.CommonDir)
+	if err != nil {
+		return false, err
+	}
+	result, err := fetch.Local(ctx, src, dst, []object.ID{id}, fetch.LocalOptions{
+		SourceShallow: shallow,
+		PackDir:       filepath.Join(dir, "pack"),
+	})
+	if err != nil {
+		return false, fmt.Errorf("copying private revision %s: %w", v.Commit, err)
+	}
+	v.shallow = result.Shallow
+	// The child inherits the host's config and refs, not the private refs
+	// (for example replacements) that were only used to resolve spec.
+	v.repo = host.WithObjectDirectory(dir)
+	v.Entries, err = v.repo.lsTree(ctx, v.Commit, true)
+	return true, err
+}
+
+// PrivateLFSPaths are the checkout-local and capture-owned paths of an LFS
+// object, respectively. It is only used for revisions from private Git dirs.
+func (v *Revision) PrivateLFSPaths(oid string) ([2]string, error) {
+	local, err := v.private.LFSObject(oid)
+	if err != nil {
+		return [2]string{}, err
+	}
+	return [2]string{local, filepath.Join(v.privateLFSCache, oid)}, nil
+}
+
+// WithObjectDirectory returns a read view with the same config and refs but
+// using dir for Git object lookups.
+func (r *Repo) WithObjectDirectory(dir string) *Repo {
+	return newRepo(r.repo.WithObjectDirectory(dir))
 }
 
 // IndexStat is the stat data a work tree presents for one file: what git
@@ -99,6 +194,11 @@ func (v *Revision) WriteIndex(ctx context.Context, name string, stat map[string]
 // SetHEAD attaches a private git directory to a local branch, or detaches it at
 // the resolved commit. It never updates the source repository's refs.
 func (v *Revision) SetHEAD(gitdir string) error {
+	if len(v.shallow) != 0 {
+		if err := fetch.UpdateShallow(gitdir, v.shallow, nil); err != nil {
+			return err
+		}
+	}
 	head := v.Commit
 	if v.Branch != "" {
 		head = "ref: " + v.Branch

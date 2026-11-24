@@ -70,7 +70,8 @@ type Repository struct {
 	// IndexPath is the work tree's index file, <GitDir>/index.
 	IndexPath string
 
-	refs *refs.Store
+	refs      *refs.Store
+	objectDir string
 }
 
 // newRepository fills in the derived parts of a Repository.
@@ -273,11 +274,22 @@ func (r *Repository) Shallow() (map[object.ID]bool, error) {
 	return set, sc.Err()
 }
 
+// WithObjectDirectory returns a read view of r with a different object database.
+func (r *Repository) WithObjectDirectory(dir string) *Repository {
+	view := *r
+	view.objectDir = dir
+	return &view
+}
+
 // OpenDB opens the repository's object database (its objects directory and
 // alternates) without replace refs, as transfers and reachability walks need
 // it. The caller closes it.
 func (r *Repository) OpenDB() (*object.DB, error) {
-	return object.Open(filepath.Join(r.CommonDir, "objects"), r.Format)
+	dir := r.objectDir
+	if dir == "" {
+		dir = filepath.Join(r.CommonDir, "objects")
+	}
+	return object.Open(dir, r.Format)
 }
 
 // LogPolicy maps core.logAllRefUpdates onto the reflog creation policy:

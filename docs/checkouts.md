@@ -222,12 +222,18 @@ message counts those commits and names the newest; `rm --force` removes the
 checkout anyway. `prune`, the end of `run` and the socket API's `rm` without
 `keep_commits` do not check.
 
-`new` (and `run`) on a checkout's own folder forks that checkout: capturing it
-would make the daemon serve the new checkout by reading through its own mount,
-which can deadlock the mount. `new` refuses the mount itself, a folder below a
-checkout's root, a folder (or repository) holding the mount, and `--rev`,
-`--take` or `--rule` with a checkout. These folders are told by file identity,
-so a symlink, another letter case or a bind mount does not get around the rule.
+`new` on a checkout's root normally forks it. With `--rev`, `new` and `run`
+instead resolve the revision in that checkout's private Git directory,
+including commits made there, and open a clean view of the revision on the
+original folder. They also accept a subdirectory of a local checkout; `run`
+preserves the caller's relative directory. This differs from `--base`, which
+returns the original capture, and from a fork, which includes uncommitted
+edits. A revision in a remote checkout or `--take` and `--rule` alongside a
+nested `--rev` are refused.
+
+A new capture never reads through the daemon's own mount, which could
+deadlock it. The mount itself and any folder containing it are refused,
+including alternate spellings of those locations.
 
 ## Output for scripts
 
