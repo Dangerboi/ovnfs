@@ -421,6 +421,7 @@ type diffCmd struct {
 	Patch    bool     `name:"patch" short:"p" help:"print a git-format patch instead of the list (binary files are named, not carried)"`
 	Binary   bool     `name:"binary" help:"print the patch as git diff --binary does, which git apply takes whole"`
 	Stat     bool     `name:"stat" help:"list each path with the lines it adds and deletes"`
+	NameOnly bool     `name:"name-only" help:"print only the paths, one per line"`
 }
 
 // AfterApply sorts the positional arguments around a bare --, which kong
@@ -451,6 +452,9 @@ func (cmd *diffCmd) AfterApply(ctx *kong.Context) error {
 }
 
 func (cmd *diffCmd) Run(c *cli) error {
+	if cmd.NameOnly && (cmd.Patch || cmd.Binary || cmd.Stat || c.json) {
+		return errors.New("diff: --name-only cannot be combined with --patch, --binary, --stat or --json")
+	}
 	a := api.DiffArgs{Checkout: cmd.Checkout, From: cmd.Snapshot, Patch: cmd.Patch, Binary: cmd.Binary, Stat: cmd.Stat, Paths: cmd.Paths}
 	r, err := call[api.DiffReply](c, "diff", a)
 	if err != nil {
@@ -471,6 +475,8 @@ func (cmd *diffCmd) Run(c *cli) error {
 		case a.Stat:
 			fmt.Fprintf(stdout, "%s\t%s\t%s %s\n", mark(stdout, ch.Status), ch.Path,
 				paint(stdout, styleGreen, fmt.Sprintf("+%d", r.Stat[i].Added)), paint(stdout, styleRed, fmt.Sprintf("-%d", r.Stat[i].Deleted)))
+		case cmd.NameOnly:
+			fmt.Fprintln(stdout, ch.Path)
 		case !patch:
 			fmt.Fprintf(stdout, "%s\t%s\n", mark(stdout, ch.Status), ch.Path)
 		}

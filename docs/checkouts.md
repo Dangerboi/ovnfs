@@ -338,6 +338,7 @@ result limits, narrower patterns or grep's column limit to reduce the reply.
 
 `diff CHECKOUT [SNAP]` compares the checkout now with its base capture (or a
 snapshot) and lists the changed source paths, one `STATUS<TAB>PATH` per line.
+`--name-only` omits the status column.
 `--stat` adds each path's added and deleted lines as a third column
 (`+3 -1`, or `binary`) and totals them on stderr.
 
