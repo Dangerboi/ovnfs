@@ -5,7 +5,17 @@ import (
 	"os"
 	"path"
 	"sync"
+
+	"github.com/stencil-hq/ovnfs/internal/unixstat"
 )
+
+func singleLink(info os.FileInfo) bool {
+	if !info.Mode().IsRegular() {
+		return false
+	}
+	st, ok := unixstat.Of(info)
+	return !ok || st.Nlink <= 1
+}
 
 // Namespace procedures. Backend errors keep their errno (statusOf), so
 // clients see EXDEV, ENOTEMPTY, EPERM and EACCES as such: a cross-checkout
@@ -160,6 +170,7 @@ func (s *Server) create3(d *decoder, res *encoder) status {
 	} else if err := f.Close(); err != nil {
 		return statusOf(err)
 	}
+	s.changes.markDir(id)
 	if st := s.apply3(p, &sa); st != stOK {
 		return st
 	}
@@ -252,6 +263,7 @@ func (s *Server) mkdir3(d *decoder, res *encoder) status {
 	if err := s.FS.MkdirAll(p, perm); err != nil {
 		return statusOf(err)
 	}
+	s.changes.markDir(id)
 	if st := s.apply3(p, &sa); st != stOK {
 		return st
 	}
@@ -281,6 +293,7 @@ func (s *Server) symlink3(d *decoder, res *encoder) status {
 	if err := s.FS.Symlink(target, p); err != nil {
 		return statusOf(err)
 	}
+	s.changes.markDir(id)
 	if st := s.apply3(p, &sa); st != stOK {
 		return st
 	}
@@ -337,6 +350,7 @@ func (s *Server) mknod3(d *decoder, res *encoder) status {
 	if err := maker.Mknod(p, mode); err != nil {
 		return statusOf(err)
 	}
+	s.changes.markDir(id)
 	if st := s.apply3(p, &sa); st != stOK {
 		return st
 	}
@@ -393,6 +407,10 @@ func (s *Server) unlink3(d *decoder, res *encoder, isDir bool) status {
 	if err != nil {
 		return statusOf(err)
 	}
+	s.changes.markDir(id)
+	if !isDir && singleLink(info) {
+		s.forgetFileSize(fid)
+	}
 	s.wcc3(res, &pre, id, dir)
 	return stOK
 }
@@ -427,8 +445,10 @@ func (s *Server) rename3(d *decoder, res *encoder) status {
 		return statusOf(err)
 	}
 	moved, replaced := s.FS.IDOf(from, fromEntry), uint64(0)
+	replacedSingle := false
 	if toEntry, err := s.FS.Lstat(to); err == nil {
 		replaced = s.FS.IDOf(to, toEntry)
+		replacedSingle = singleLink(toEntry)
 	}
 	recall := func() {
 		s.Recall(moved)
@@ -441,6 +461,13 @@ func (s *Server) rename3(d *decoder, res *encoder) status {
 	recall()
 	if err != nil {
 		return statusOf(err)
+	}
+	s.changes.markDir(fromID)
+	if toID != fromID {
+		s.changes.markDir(toID)
+	}
+	if replaced != 0 && replacedSingle {
+		s.forgetFileSize(replaced)
 	}
 	s.wcc3(res, &fromPre, fromID, fromDir)
 	s.wcc3(res, &toPre, toID, toDir)
@@ -482,6 +509,7 @@ func (s *Server) link3(d *decoder, res *encoder) status {
 	if err != nil {
 		return statusOf(err)
 	}
+	s.changes.markDir(dirID)
 	s.postOp3(res, id, p)
 	s.wcc3(res, &pre, dirID, dir)
 	return stOK

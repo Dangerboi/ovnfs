@@ -8,6 +8,7 @@ import (
 	"container/list"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-git/go-billy/v5"
@@ -37,12 +38,16 @@ type Cache[K comparable] struct {
 	mu    sync.Mutex
 	files map[K]*list.Element // of *entry[K]
 	lru   list.List           // most recently used first
+	count atomic.Int32
 }
+
+// Len reports the number of currently kept files.
+func (c *Cache[K]) Len() int { return int(c.count.Load()) }
 
 // entry is one kept file. It closes once idle with no call under way, or
 // once dropped and its last call returned.
 type entry[K comparable] struct {
-	mu    sync.Mutex // serializes calls, e.g. seek/write for files without WriteAt
+	mu    sync.RWMutex // exclusive for With (e.g. seek/write); shared for WithShared (ReadAt/Stat)
 	key   K
 	f     billy.File
 	users int
@@ -61,7 +66,19 @@ func (c *Cache[K]) Has(key K) bool {
 // Keep takes ownership of f, closing it if key is already cached or every
 // slot is busy. Any descriptor closed here reports its error to the caller.
 func (c *Cache[K]) Keep(key K, f billy.File) error {
+	return c.KeepIf(key, f, nil)
+}
+
+// KeepIf takes ownership of f and caches it under key when allow is nil or
+// returns true under the cache lock; otherwise it closes f without caching.
+// It also closes f if key is already cached or every slot is busy. Any
+// descriptor closed here reports its error to the caller.
+func (c *Cache[K]) KeepIf(key K, f billy.File, allow func() bool) error {
 	c.mu.Lock()
+	if allow != nil && !allow() {
+		c.mu.Unlock()
+		return f.Close()
+	}
 	if _, ok := c.files[key]; ok {
 		c.mu.Unlock()
 		return f.Close()
@@ -79,6 +96,7 @@ func (c *Cache[K]) Keep(key K, f billy.File) error {
 	}
 	e := &entry[K]{key: key, f: f}
 	c.files[key] = c.lru.PushFront(e)
+	c.count.Add(1)
 	e.timer = time.AfterFunc(c.idle(), func() { c.expire(e) })
 	c.mu.Unlock()
 	if evicted != nil {
@@ -89,6 +107,17 @@ func (c *Cache[K]) Keep(key K, f billy.File) error {
 
 // With serializes fn on key's kept file; ok is false when there is none.
 func (c *Cache[K]) With(key K, fn func(billy.File) error) (ok bool, err error) {
+	return c.with(key, false, fn)
+}
+
+// WithShared runs fn on key's kept file concurrently with other WithShared
+// callers (for positioned operations such as ReadAt and Stat); ok is false
+// when there is none.
+func (c *Cache[K]) WithShared(key K, fn func(billy.File) error) (ok bool, err error) {
+	return c.with(key, true, fn)
+}
+
+func (c *Cache[K]) with(key K, shared bool, fn func(billy.File) error) (ok bool, err error) {
 	c.mu.Lock()
 	el := c.files[key]
 	if el == nil {
@@ -100,14 +129,20 @@ func (c *Cache[K]) With(key K, fn func(billy.File) error) (ok bool, err error) {
 	c.lru.MoveToFront(el)
 	c.mu.Unlock()
 
-	e.mu.Lock()
-	err = fn(e.f)
-	e.mu.Unlock()
+	if shared {
+		e.mu.RLock()
+		err = fn(e.f)
+		e.mu.RUnlock()
+	} else {
+		e.mu.Lock()
+		err = fn(e.f)
+		e.mu.Unlock()
+	}
 
 	c.mu.Lock()
 	e.users--
 	closing := e.gone && e.users == 0
-	if !e.gone {
+	if !e.gone && e.users == 0 {
 		e.timer.Reset(c.idle())
 	}
 	c.mu.Unlock()
@@ -136,6 +171,26 @@ func (c *Cache[K]) Drop(key K) error {
 	return e.f.Close()
 }
 
+// DropFunc forgets every kept file whose key match accepts, closing idle
+// ones at once and busy ones once their in-flight calls return.
+func (c *Cache[K]) DropFunc(match func(K) bool) {
+	c.mu.Lock()
+	var idle []billy.File
+	for el := c.lru.Front(); el != nil; {
+		next := el.Next()
+		if match(el.Value.(*entry[K]).key) {
+			if e := c.removeLocked(el); e.users == 0 {
+				idle = append(idle, e.f)
+			}
+		}
+		el = next
+	}
+	c.mu.Unlock()
+	for _, f := range idle {
+		f.Close()
+	}
+}
+
 // Close drops every kept file, as a server's process exiting would: Windows
 // cannot remove a folder while a file in it is open.
 func (c *Cache[K]) Close() {
@@ -160,6 +215,7 @@ func (c *Cache[K]) removeLocked(el *list.Element) *entry[K] {
 	e.gone = true
 	c.lru.Remove(el)
 	delete(c.files, e.key)
+	c.count.Add(-1)
 	return e
 }
 

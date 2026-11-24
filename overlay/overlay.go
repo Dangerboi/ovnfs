@@ -675,17 +675,33 @@ func (f *FS) Open(name string) (billy.File, error) { return f.OpenFile(name, os.
 func (f *FS) openLower(name string, flag int) (h billy.File, ok bool, err error) {
 	p := Clean(name)
 	f.mu.RLock()
-	s, info, err := f.lookupRead(p)
-	bottom := f.bottom
+	layer, q, bottom, hit := f.resolveLower(p)
 	f.mu.RUnlock()
-	if err != nil || s.upper || !info.Mode().IsRegular() {
+	if !hit {
 		return nil, false, nil
 	}
-	if s.layer != nil {
-		h, err := s.layer.open(s.path, p, flag)
+	if layer != nil {
+		h, err := layer.open(q, p, flag)
 		return h, true, err
 	}
-	c, err := bottom.Open(s.path)
+	if opener, has := bottom.(InfoOpener); has {
+		c, info, err := opener.OpenInfo(q)
+		if err != nil {
+			if missing(err) {
+				return nil, false, nil
+			}
+			return nil, true, err
+		}
+		if c == nil {
+			return nil, false, nil
+		}
+		return wrapContent(c, p, info), true, nil
+	}
+	info, err := bottom.Lstat(q)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, false, nil
+	}
+	c, err := bottom.Open(q)
 	if err != nil {
 		return nil, true, err
 	}

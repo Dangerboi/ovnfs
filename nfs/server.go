@@ -61,6 +61,8 @@ type Server struct {
 	epoch   atomic.Uint64
 	dirs    dirCache
 	resumes resumeCache
+	connMu  sync.Mutex
+	conns   map[*conn]struct{}
 	v3      v3State
 	v4      v4State
 	// timers are the Stats timers of the NFSv3 procedures by number, and of
@@ -102,6 +104,9 @@ func (s *Server) Serve(l net.Listener) error {
 func (s *Server) start() {
 	s.once.Do(func() {
 		_, _ = rand.Read(s.verf[:])
+		if s.v3.readers.cache.Max == 0 {
+			s.v3.readers.cache.Max = defaultKeptReaders
+		}
 		s.v4.start(s)
 		for proc, p := range v3procs {
 			if p.run != nil {
@@ -117,7 +122,8 @@ func (s *Server) start() {
 // themselves; the embedder calls Recall for every other change to a file
 // Backend.Cacheable admits. It does not block.
 func (s *Server) Recall(id uint64) {
-	s.changes.invalidate()
+	s.changes.markDir(id)
+	s.v3.readers.invalidate(id)
 	s.v4.recall(id)
 }
 
@@ -125,7 +131,8 @@ func (s *Server) Recall(id uint64) {
 // and symlink changes can affect other entries, so keep the broad recall.
 func (s *Server) recallAttrs(id uint64, typ fileType) {
 	if typ == typeReg {
-		s.changes.mark(s.changes.file(id))
+		s.changes.markFile(id)
+		s.v3.readers.invalidate(id)
 		s.v4.recall(id)
 	} else {
 		s.Recall(id)
@@ -136,7 +143,8 @@ func (s *Server) recallAttrs(id uint64, typ fileType) {
 // embedder's changes that reach many files at once, such as every file of a
 // checkout (a checkout's ids share one range). It does not block.
 func (s *Server) RecallRange(first, last uint64) {
-	s.changes.invalidate()
+	s.changes.markRange(first, last)
+	s.v3.readers.invalidateRange(first, last)
 	s.v4.recallRange(first, last)
 }
 
@@ -145,6 +153,9 @@ func (s *Server) RecallRange(first, last uint64) {
 // range under its registry lock; no listing-cache lock calls the backend.
 func (s *Server) RetireRange(first, last uint64) {
 	s.RecallRange(first, last)
+	s.v3.kept.DropFunc(func(k keptKey) bool { return first <= k.id && k.id <= last })
+	s.v3.maxSizes.retireRange(first, last)
+	s.forEachConn(func(c *conn) { c.v3sizes.retireRange(first, last) })
 	s.listMu.Lock()
 	defer s.listMu.Unlock()
 	s.epoch.Add(1)
@@ -160,6 +171,34 @@ func (s *Server) RetireRange(first, last uint64) {
 			s.resumes.lru.Remove(e)
 		}
 	}
+}
+
+func (s *Server) addConn(c *conn) {
+	s.connMu.Lock()
+	if s.conns == nil {
+		s.conns = make(map[*conn]struct{})
+	}
+	s.conns[c] = struct{}{}
+	s.connMu.Unlock()
+}
+
+func (s *Server) removeConn(c *conn) {
+	s.connMu.Lock()
+	delete(s.conns, c)
+	s.connMu.Unlock()
+}
+
+func (s *Server) forEachConn(fn func(*conn)) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	for c := range s.conns {
+		fn(c)
+	}
+}
+
+func (s *Server) forgetFileSize(id uint64) {
+	s.v3.maxSizes.forget(id)
+	s.forEachConn(func(c *conn) { c.v3sizes.forget(id) })
 }
 
 // logf logs through Logf, if set.

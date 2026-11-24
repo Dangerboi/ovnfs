@@ -46,6 +46,14 @@ type VanishedLocator interface {
 	Vanished(id ident.ID, ok func(string) bool) (string, os.FileInfo, bool)
 }
 
+// InfoOpener is implemented by a bottom that returns a regular file's
+// metadata alongside its open Content, so [FS.openLower] opens a bottom file
+// in one resolve instead of stating and resolving it twice. Non-regular
+// entries return (nil, info, nil).
+type InfoOpener interface {
+	OpenInfo(p string) (Content, os.FileInfo, error)
+}
+
 // Awaiter is implemented by bottoms whose first access to some paths waits
 // for background work (base cache snapshots). [FS] calls Await(p) before
 // taking its lock in every entry point taking a path (p clean,

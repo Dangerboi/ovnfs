@@ -14,6 +14,79 @@ import (
 	"github.com/stencil-hq/ovnfs/internal/ident"
 )
 
+// resolveLower finds whether clean path p is served by a frozen layer or
+// falls through to the bottom, without touching the bottom under f.mu.RLock.
+// ok is false when p is reserved, the root, held or hidden by the upper, or
+// not a regular file in a frozen layer.
+func (f *FS) resolveLower(p string) (layer *Layer, q string, bottom Bottom, ok bool) {
+	if p == "" || reserved(p) {
+		return nil, "", nil, false
+	}
+	q = p
+	if f.index != nil {
+		if _, present := f.index.entries[p]; present || f.index.barrier(p) {
+			return nil, "", nil, false
+		}
+		q = f.index.redirected(p)
+	} else if f.upper != "" {
+		d, err := f.cold.dir(f.upper, "")
+		if err != nil {
+			return nil, "", nil, false
+		}
+		blocked := d.opaque
+		at, origin := "", ""
+		start := 0
+		for {
+			stop := len(p)
+			if i := strings.IndexByte(p[start:], '/'); i >= 0 {
+				stop = start + i
+			}
+			child, name := p[:stop], p[start:stop]
+			has, isDir, err := d.has(f, child, name)
+			if err != nil {
+				return nil, "", nil, false
+			}
+			if !has {
+				if gone, err := d.whiteout(f, child, name); err != nil || gone || blocked {
+					return nil, "", nil, false
+				}
+				if at != "" {
+					q = origin + p[len(at):]
+				}
+				break
+			}
+			if stop == len(p) || !isDir {
+				return nil, "", nil, false
+			}
+			if d, err = f.cold.dir(f.upper, child); err != nil {
+				return nil, "", nil, false
+			}
+			blocked = blocked || d.opaque
+			if d.redirect != "" {
+				at, origin, blocked = child, d.redirect, false
+			}
+			start = stop + 1
+		}
+	}
+	for _, l := range f.layers {
+		v := l.view()
+		if e, present := v.entries[q]; present {
+			if e.Kind == KindWhiteout || !e.Info.Mode().IsRegular() {
+				return nil, "", nil, false
+			}
+			return l, q, nil, true
+		}
+		if v.barrier(q) {
+			return nil, "", nil, false
+		}
+		q = v.redirected(q)
+	}
+	if f.bottom == nil {
+		return nil, "", nil, false
+	}
+	return nil, q, f.bottom, true
+}
+
 // lookupRead checks only the requested path and ancestor barriers while cold.
 // A native stat follows intermediate symlinks, so inspect the ancestors first.
 // The upper directories it passes are listed once and kept (coldDirs), so

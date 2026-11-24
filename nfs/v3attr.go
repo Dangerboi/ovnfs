@@ -2,6 +2,7 @@ package nfs
 
 import (
 	"errors"
+	"maps"
 	"math"
 	"os"
 	"sync"
@@ -9,18 +10,29 @@ import (
 	"time"
 
 	"github.com/go-git/go-billy/v5"
+	"github.com/stencil-hq/ovnfs/internal/ident"
 	"github.com/stencil-hq/ovnfs/internal/unixstat"
 )
+
+// sizeBucketBits groups file ids into buckets aligned with checkout slots
+// (export's slot<<ident.Bits | identity), so retiring a checkout drops its
+// whole size table in O(1) and releases the map memory to the GC.
+const sizeBucketBits = ident.Bits
 
 // maxReportedSizes keeps a reconnect from forgetting a size another
 // connection has already reported. A file's size never decreases until
 // retire, after which clients see the file through new handles and its
 // history starts afresh.
 type maxReportedSizes struct {
-	mu     sync.Mutex
-	retire sync.Mutex // serializes generation changes, never held on a normal stat
-	clock  atomic.Uint64
-	byID   map[uint64]reportedSize
+	mu      sync.Mutex
+	retire  sync.Mutex // serializes generation changes, never held on a normal stat
+	clock   atomic.Uint64
+	buckets map[uint64]*sizeBucket
+}
+
+type sizeBucket struct {
+	entries map[uint64]reportedSize
+	peak    int
 }
 
 type reportedSize struct {
@@ -28,13 +40,88 @@ type reportedSize struct {
 	changed     uint64 // clock at the last change in the size clients may be told
 }
 
+// load returns id's recorded size fence; the caller holds mu.
+func (m *maxReportedSizes) load(id uint64) reportedSize {
+	if b := m.buckets[id>>sizeBucketBits]; b != nil {
+		return b.entries[id]
+	}
+	return reportedSize{}
+}
+
 // store records a new size fence; the caller holds mu.
 func (m *maxReportedSizes) store(id uint64, r reportedSize) {
-	if m.byID == nil {
-		m.byID = make(map[uint64]reportedSize)
+	if m.buckets == nil {
+		m.buckets = make(map[uint64]*sizeBucket)
+	}
+	bk := id >> sizeBucketBits
+	b := m.buckets[bk]
+	if b == nil {
+		b = &sizeBucket{entries: make(map[uint64]reportedSize)}
+		m.buckets[bk] = b
 	}
 	r.changed = m.clock.Add(1)
-	m.byID[id] = r
+	b.entries[id] = r
+	if len(b.entries) > b.peak {
+		b.peak = len(b.entries)
+	}
+}
+
+// forget removes a single removed file's size fence and shrinks sparse buckets.
+func (m *maxReportedSizes) forget(id uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	bk := id >> sizeBucketBits
+	b := m.buckets[bk]
+	if b == nil {
+		return
+	}
+	delete(b.entries, id)
+	m.shrinkLocked(bk, b)
+}
+
+// retireRange drops every recorded size in [first, last], releasing whole
+// aligned buckets in O(1) so removed checkouts neither leak memory nor poison
+// reused checkout slots.
+func (m *maxReportedSizes) retireRange(first, last uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if first > last || len(m.buckets) == 0 {
+		return
+	}
+	const mask = uint64(1)<<sizeBucketBits - 1
+	firstB, lastB := first>>sizeBucketBits, last>>sizeBucketBits
+	for bk, b := range m.buckets {
+		if bk < firstB || bk > lastB {
+			continue
+		}
+		bFirst := bk << sizeBucketBits
+		bLast := bFirst | mask
+		if first <= bFirst && bLast <= last {
+			delete(m.buckets, bk)
+			continue
+		}
+		for id := range b.entries {
+			if first <= id && id <= last {
+				delete(b.entries, id)
+			}
+		}
+		m.shrinkLocked(bk, b)
+	}
+}
+
+// shrinkLocked drops an empty bucket or compacts one that shrank far below its
+// peak, since Go maps do not release deleted bucket storage in place.
+func (m *maxReportedSizes) shrinkLocked(bk uint64, b *sizeBucket) {
+	if len(b.entries) == 0 {
+		delete(m.buckets, bk)
+		return
+	}
+	if b.peak >= 1024 && len(b.entries) <= b.peak/4 {
+		fresh := make(map[uint64]reportedSize, len(b.entries))
+		maps.Copy(fresh, b.entries)
+		b.entries = fresh
+		b.peak = len(fresh)
+	}
 }
 
 // clientReportedSizes lets only the connection that requested a truncate
@@ -65,7 +152,7 @@ func (s *clientReportedSizes) check(m *maxReportedSizes, id, size, sampled uint6
 	s.wait(id)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	r := m.byID[id]
+	r := m.load(id)
 	floor := r.size
 	if req, ok := s.byID[id]; ok {
 		if req.epoch == r.epoch {
@@ -119,7 +206,7 @@ func (s *clientReportedSizes) finish(maximum *maxReportedSizes, id, size uint64,
 	s.mu.Lock()
 	if accepted {
 		maximum.mu.Lock()
-		r := maximum.byID[id]
+		r := maximum.load(id)
 		if size < r.size {
 			if s.byID == nil {
 				s.byID = make(map[uint64]requestedSize)
@@ -135,6 +222,22 @@ func (s *clientReportedSizes) finish(maximum *maxReportedSizes, id, size uint64,
 	delete(s.pending, id)
 	if s.changed != nil {
 		s.changed.Broadcast()
+	}
+	s.mu.Unlock()
+}
+
+func (s *clientReportedSizes) forget(id uint64) {
+	s.mu.Lock()
+	delete(s.byID, id)
+	s.mu.Unlock()
+}
+
+func (s *clientReportedSizes) retireRange(first, last uint64) {
+	s.mu.Lock()
+	for id := range s.byID {
+		if first <= id && id <= last {
+			delete(s.byID, id)
+		}
 	}
 	s.mu.Unlock()
 }
@@ -193,7 +296,7 @@ func (s *Server) admitSize3(e *encoder, a *attrs, gen uint64) (retry bool, st st
 	}
 	// Another observer may have published a change since checkSize.
 	m.mu.Lock()
-	changed := m.byID[id].changed
+	changed := m.load(id).changed
 	m.mu.Unlock()
 	if changed > e.sampled {
 		return true, stOK
@@ -201,7 +304,7 @@ func (s *Server) admitSize3(e *encoder, a *attrs, gen uint64) (retry bool, st st
 	s.Recall(id)
 	if s.FS.RetireHandle(id) {
 		m.mu.Lock()
-		m.store(id, reportedSize{epoch: m.byID[id].epoch + 1})
+		m.store(id, reportedSize{epoch: m.load(id).epoch + 1})
 		m.mu.Unlock()
 	}
 	return false, stStale

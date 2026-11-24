@@ -14,7 +14,7 @@ import (
 
 // routerFile serializes file calls and redirects stale descriptors into the current upper.
 type routerFile struct {
-	mu     sync.Mutex
+	mu     sync.RWMutex
 	router *Router
 	co     string
 	path   string
@@ -29,6 +29,36 @@ type routerFile struct {
 	// identity is the entry's, read at open, which finds it again after a
 	// freeze closed file (see relocate).
 	identity ident.ID
+}
+
+// tryShared enters op on f's current checkout generation under a shared lock.
+// When ready is true, the caller holds both f.mu.RLock and s, and must
+// release s before calling f.mu.RUnlock. When ready is false and err is nil,
+// f needs an exclusive reopen via current.
+func (f *routerFile) tryShared(op string, s *checkout.Session) (ready bool, err error) {
+	f.mu.RLock()
+	if f.closed || f.life.retired.Load() {
+		f.mu.RUnlock()
+		return false, &os.PathError{Op: op, Path: f.Name(), Err: os.ErrClosed}
+	}
+	if err := f.router.enter(f.co, op, f.Name(), s); err != nil {
+		f.mu.RUnlock()
+		if errors.Is(err, os.ErrNotExist) {
+			return false, &os.PathError{Op: op, Path: f.Name(), Err: os.ErrClosed}
+		}
+		return false, err
+	}
+	if f.life.retired.Load() {
+		s.Done()
+		f.mu.RUnlock()
+		return false, &os.PathError{Op: op, Path: f.Name(), Err: os.ErrClosed}
+	}
+	if s.Gen == f.gen {
+		return true, nil
+	}
+	s.Done()
+	f.mu.RUnlock()
+	return false, nil
 }
 
 // routerFileInterface checks that generation-aware files provide all billy operations.
@@ -110,9 +140,16 @@ func (f *routerFile) Read(p []byte) (int, error) {
 
 // ReadAt reads without changing the offset remembered for a later reopen.
 func (f *routerFile) ReadAt(p []byte, off int64) (int, error) {
+	var s checkout.Session
+	if ready, err := f.tryShared("readat", &s); err != nil {
+		return 0, err
+	} else if ready {
+		defer f.mu.RUnlock()
+		defer s.Done()
+		return f.file.ReadAt(p, off)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var s checkout.Session
 	if err := f.current("readat", &s); err != nil {
 		return 0, err
 	}
@@ -238,9 +275,19 @@ func (f *routerFile) Unlock() error {
 
 // Stat reports the current file attributes for backends that inspect open files.
 func (f *routerFile) Stat() (os.FileInfo, error) {
+	var s checkout.Session
+	if ready, err := f.tryShared("stat", &s); err != nil {
+		return nil, err
+	} else if ready {
+		defer f.mu.RUnlock()
+		defer s.Done()
+		if statter, ok := f.file.(interface{ Stat() (os.FileInfo, error) }); ok {
+			return statter.Stat()
+		}
+		return s.FS.Stat(f.path)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var s checkout.Session
 	if err := f.current("stat", &s); err != nil {
 		return nil, err
 	}

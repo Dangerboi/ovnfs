@@ -397,13 +397,16 @@ func (st *v4State) checkDeleg(id v4StateID, client, file uint64) status {
 
 // conflict checks a change to file against other clients' delegations
 // (v4State.conflict).
-func (x *v4compound) conflict(file uint64) status { return x.s.v4.conflict(x.who(), file) }
+func (x *v4compound) conflict(file uint64) status {
+	x.s.v3.readers.invalidate(file)
+	return x.s.v4.conflict(x.who(), file)
+}
 
 // conflictName is conflict for the regular file name in directory dir, if
 // there is one, and returns its id for changed once the change is made
 // (0 while nothing is delegated or being granted, which spares the lookup).
 func (x *v4compound) conflictName(dir, name string) (uint64, status) {
-	if !x.s.v4.active() {
+	if !x.s.v4.active() && !x.s.v3.readers.active() {
 		return 0, stOK
 	}
 	p := v4Join(dir, name)
@@ -417,7 +420,10 @@ func (x *v4compound) conflictName(dir, name string) (uint64, status) {
 
 // changed recalls other clients' delegations of a file just changed: one
 // may have been granted while the change was under way.
-func (x *v4compound) changed(file uint64) { x.s.v4.changed(x.who(), file) }
+func (x *v4compound) changed(file uint64) {
+	x.s.v3.readers.invalidate(file)
+	x.s.v4.changed(x.who(), file)
+}
 
 // prepareDelegate begins a possible read delegation before the state lock is
 // taken to install OPEN. Backend.Cacheable must run outside that lock; the

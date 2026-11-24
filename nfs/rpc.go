@@ -137,6 +137,8 @@ func sinceStart() int64 { return int64(time.Since(start)) }
 // CPU than answering a LOOKUP or GETATTR. Should the call take longer than
 // inlineMax, another goroutine takes over reading (watchInline).
 func (c *conn) serve() {
+	c.srv.addConn(c)
+	defer c.srv.removeConn(c)
 	defer c.nc.Close()
 	c.r = bufio.NewReaderSize(c.nc, 64<<10)
 	if c.srv.Concurrency <= 1 {

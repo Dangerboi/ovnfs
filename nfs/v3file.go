@@ -253,47 +253,92 @@ func (s *Server) read3(d *decoder, res *encoder) status {
 	}
 	start := res.len()
 	shortEOF := false
+	retryCached := true
 	for {
 		res.sampleSizes()
-		f, a, st := s.openRead3(id, gen, ok)
+		p, st := s.path3(id, gen, ok)
 		if st != stOK {
 			return st
 		}
-		var n uint64
-		if off < a.size {
-			n = min(uint64(count), a.size-off, maxIO)
+		cacheable := s.FS.Cacheable(p)
+		var (
+			a   attrs
+			n   uint64
+			got int
+			at  int
+			err error
+			hit bool
+		)
+		if cacheable && retryCached {
+			hit, _ = s.v3.readers.with(id, func(f billy.File) error {
+				var info os.FileInfo
+				info, err = statOpenFile(f)
+				if err != nil {
+					return err
+				}
+				a = attrsOf(id, info)
+				n, at, got, err = readInto3(res, f, &a, off, count, true)
+				return nil
+			})
+			if hit && err != nil && !errors.Is(err, io.EOF) {
+				s.v3.readers.drop(id)
+				if errors.Is(err, os.ErrClosed) {
+					retryCached = false
+					res.truncate(start)
+					continue
+				}
+				return statusOf(err)
+			}
 		}
-		res.bool(true)
-		fattr3(res, &a)
-		at := res.len()
-		res.u32(0) // count
-		res.u32(0) // eof
-		var got int
-		var err error
-		if n == 0 {
-			res.u32(0)
-		} else {
-			got, err = res.opaqueFrom(int(n), func(b []byte) (int, error) { return f.ReadAt(b, int64(off)) })
+		var opened billy.File
+		var stamp uint64
+		if !hit {
+			if cacheable {
+				stamp = s.v3.readers.stamp()
+			}
+			opened, a, st = s.openReadAt3(id, gen, p)
+			if st != stOK {
+				return st
+			}
+			n, at, got, err = readInto3(res, opened, &a, off, count, false)
+			if err != nil && !errors.Is(err, io.EOF) {
+				opened.Close()
+				return statusOf(err)
+			}
 		}
-		f.Close()
-		if err != nil && !errors.Is(err, io.EOF) {
-			return statusOf(err)
-		}
-		if retry, st := s.admitSize3(res, &a, gen); retry {
-			res.truncate(start)
-			continue
-		} else if st != stOK {
+		retry, st := s.admitSize3(res, &a, gen)
+		if retry || st != stOK {
+			if opened != nil {
+				opened.Close()
+			}
+			if retry {
+				res.truncate(start)
+				continue
+			}
 			return st
 		}
 		if errors.Is(err, io.EOF) && uint64(got) < n {
 			// The file may have shrunk between Stat and ReadAt. Never pair
 			// an early EOF with attributes promising data beyond it.
+			if opened != nil {
+				opened.Close()
+			} else {
+				s.v3.readers.drop(id)
+				retryCached = false
+			}
 			if shortEOF {
 				return stIO
 			}
 			shortEOF = true
 			res.truncate(start)
 			continue
+		}
+		if opened != nil {
+			if cacheable && canStatFile(opened) {
+				_ = s.v3.readers.keep(id, opened, stamp)
+			} else {
+				opened.Close()
+			}
 		}
 		res.put32(at, uint32(got))
 		if off+uint64(got) >= a.size {
@@ -303,13 +348,43 @@ func (s *Server) read3(d *decoder, res *encoder) status {
 	}
 }
 
-// openRead3 samples the size and identity of the descriptor supplying the
-// bytes. A path stat after open may describe a replacement instead.
-func (s *Server) openRead3(id, gen uint64, ok bool) (billy.File, attrs, status) {
-	p, st := s.path3(id, gen, ok)
-	if st != stOK {
-		return nil, attrs{}, st
+// readInto3 writes the READ3 post_op_attr, count/eof placeholders and data
+// directly into res. For a cached descriptor at or past EOF (n == 0), a
+// zero-length ReadAt still validates fenced descriptors before answering OK.
+func readInto3(res *encoder, f billy.File, a *attrs, off uint64, count uint32, cached bool) (n uint64, at, got int, err error) {
+	if off < a.size {
+		n = min(uint64(count), a.size-off, maxIO)
 	}
+	res.bool(true)
+	fattr3(res, a)
+	at = res.len()
+	res.u32(0) // count
+	res.u32(0) // eof
+	if n == 0 {
+		if cached {
+			if _, err = f.ReadAt(nil, 0); err != nil && !errors.Is(err, io.EOF) {
+				return 0, at, 0, err
+			}
+		}
+		res.u32(0)
+		return 0, at, 0, nil
+	}
+	got, err = res.opaqueFrom(int(n), func(b []byte) (int, error) { return f.ReadAt(b, int64(off)) })
+	return n, at, got, err
+}
+
+func canStatFile(f billy.File) bool {
+	_, ok := f.(interface{ Stat() (os.FileInfo, error) })
+	return ok
+}
+
+func statOpenFile(f billy.File) (os.FileInfo, error) {
+	return f.(interface{ Stat() (os.FileInfo, error) }).Stat()
+}
+
+// openReadAt3 samples the size and identity of the descriptor supplying the
+// bytes. A path stat after open may describe a replacement instead.
+func (s *Server) openReadAt3(id, gen uint64, p string) (billy.File, attrs, status) {
 	f, _, info, err := s.openHandle(id, gen, p, os.O_RDONLY)
 	if err != nil {
 		return nil, attrs{}, statusOf(err)

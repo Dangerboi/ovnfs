@@ -97,7 +97,10 @@ func (s *Server) list3(d *decoder, res *encoder, plus bool) status {
 	// Namespace changes and unknown writers require a stat of every entry;
 	// a write to a known file need not make the rest of the directory pay.
 	continuing := plus && cookie != 0
-	refreshAll := continuing && (s.changes.all.Load() > l.changes || !s.FS.Cacheable(p))
+	refreshAll := continuing && (s.changes.all.Load() > l.changes ||
+		s.changes.slot(id).Load() > l.changes ||
+		s.changes.dir(id).Load() > l.changes ||
+		!s.FS.Cacheable(p))
 	checkFiles := continuing && !refreshAll && s.changes.clock.Load() != l.changes
 	for i := start; fits && i < len(l.entries); i++ {
 		info := l.entries[i]

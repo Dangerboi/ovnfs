@@ -208,3 +208,49 @@ func TestSlowBottomOpenDoesNotBlockOtherOperations(t *testing.T) {
 		})
 	}
 }
+
+type countingInfoBottom struct {
+	dirBottom
+	lstats    int
+	openInfos int
+}
+
+func (b *countingInfoBottom) Lstat(p string) (os.FileInfo, error) {
+	b.lstats++
+	return b.dirBottom.Lstat(p)
+}
+
+func (b *countingInfoBottom) OpenInfo(p string) (Content, os.FileInfo, error) {
+	b.openInfos++
+	info, err := b.dirBottom.Lstat(p)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, info, nil
+	}
+	c, err := b.dirBottom.Open(p)
+	return c, info, err
+}
+
+// TestOpenLowerUsesSingleOpenInfo checks that opening a regular bottom file
+// via InfoOpener does not also call Bottom.Lstat.
+func TestOpenLowerUsesSingleOpenInfo(t *testing.T) {
+	lower := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(lower, "data.bin"), []byte("payload"), 0o644))
+	b := &countingInfoBottom{dirBottom: dirBottom{lower}}
+	f, err := New(filepath.Join(t.TempDir(), "upper"), nil, b, nil)
+	must(t, err)
+	b.lstats = 0
+	h, err := f.Open("data.bin")
+	must(t, err)
+	got, err := io.ReadAll(h)
+	h.Close()
+	must(t, err)
+	if string(got) != "payload" {
+		t.Fatalf("read = %q, want payload", got)
+	}
+	if b.openInfos != 1 || b.lstats != 0 {
+		t.Fatalf("openInfos=%d lstats=%d, want 1 and 0", b.openInfos, b.lstats)
+	}
+}

@@ -235,6 +235,7 @@ func startServer(t testing.TB, s *Server) string {
 // directory while a file in it is open.
 func closeKept(s *Server) {
 	s.v3.kept.Close()
+	s.v3.readers.close()
 
 	st := &s.v4
 	st.mu.Lock()

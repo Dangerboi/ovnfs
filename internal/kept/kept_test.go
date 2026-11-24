@@ -88,3 +88,70 @@ func TestDropWhileInUse(t *testing.T) {
 		t.Fatalf("second drop: %v, %d closes", err, closes)
 	}
 }
+
+// TestWithSharedRunsConcurrently checks that WithShared lets concurrent callers
+// overlap on the same kept file and that DropFunc closes it only after all
+// in-flight callers return.
+func TestWithSharedRunsConcurrently(t *testing.T) {
+	var cache Cache[int]
+	closes := 0
+	if err := cache.Keep(1, closeCount{closes: &closes}); err != nil {
+		t.Fatal(err)
+	}
+	if cache.Len() != 1 {
+		t.Fatalf("Len = %d, want 1", cache.Len())
+	}
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	done := make(chan error, 2)
+	for range 2 {
+		go func() {
+			ok, err := cache.WithShared(1, func(billy.File) error {
+				entered <- struct{}{}
+				<-release
+				return nil
+			})
+			if !ok {
+				done <- os.ErrNotExist
+				return
+			}
+			done <- err
+		}()
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("WithShared serialized concurrent callers")
+		}
+	}
+	cache.DropFunc(func(k int) bool { return k == 1 })
+	if closes != 0 {
+		t.Fatalf("DropFunc closed in-use file (%d closes)", closes)
+	}
+	if cache.Len() != 0 {
+		t.Fatalf("Len after DropFunc = %d, want 0", cache.Len())
+	}
+	close(release)
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatalf("WithShared: %v", err)
+		}
+	}
+	if closes != 1 {
+		t.Fatalf("closes = %d, want 1", closes)
+	}
+}
+
+// TestKeepIfRejectsAndCloses checks that KeepIf closes f without caching when
+// its predicate rejects insertion.
+func TestKeepIfRejectsAndCloses(t *testing.T) {
+	var cache Cache[int]
+	closes := 0
+	if err := cache.KeepIf(1, closeCount{closes: &closes}, func() bool { return false }); err != nil {
+		t.Fatal(err)
+	}
+	if closes != 1 || cache.Has(1) || cache.Len() != 0 {
+		t.Fatalf("after rejected KeepIf: closes=%d has=%v len=%d", closes, cache.Has(1), cache.Len())
+	}
+}

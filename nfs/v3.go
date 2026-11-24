@@ -63,6 +63,7 @@ type v3State struct {
 	// here: clients may send their buffered writes afterwards. NFSv4 keeps
 	// those permission fallbacks per open instead (keepWritable).
 	kept     kept.Cache[keptKey]
+	readers  readCache
 	verfs    createVerfs
 	maxSizes maxReportedSizes
 	order    fileOrder
@@ -79,34 +80,31 @@ type v3proc struct {
 	name string // as RFC 1813 spells it, which names its Server.Stats timer
 	run  func(s *Server, d *decoder, res *encoder) status
 	fail int
-	// namespace marks changes that can affect multiple entries. SETATTR and
-	// WRITE record their affected object themselves.
-	namespace bool
 }
 
 // v3procs are the procedures by number; NULL is answered by nfs3 itself.
 var v3procs = [v3Count]v3proc{
-	v3GetAttr:     {"GETATTR", (*Server).getattr3, 0, false},
-	v3SetAttr:     {"SETATTR", (*Server).setattr3, 8, false},
-	v3Lookup:      {"LOOKUP", (*Server).lookup3, 4, false},
-	v3Access:      {"ACCESS", (*Server).access3, 4, false},
-	v3Readlink:    {"READLINK", (*Server).readlink3, 4, false},
-	v3Read:        {"READ", (*Server).read3, 4, false},
-	v3Write:       {"WRITE", (*Server).write3, 8, false},
-	v3Create:      {"CREATE", (*Server).create3, 8, true},
-	v3Mkdir:       {"MKDIR", (*Server).mkdir3, 8, true},
-	v3Symlink:     {"SYMLINK", (*Server).symlink3, 8, true},
-	v3Mknod:       {"MKNOD", (*Server).mknod3, 8, true},
-	v3Remove:      {"REMOVE", (*Server).remove3, 8, true},
-	v3Rmdir:       {"RMDIR", (*Server).rmdir3, 8, true},
-	v3Rename:      {"RENAME", (*Server).rename3, 16, true},
-	v3Link:        {"LINK", (*Server).link3, 12, true},
-	v3ReadDir:     {"READDIR", (*Server).readdir3, 4, false},
-	v3ReadDirPlus: {"READDIRPLUS", (*Server).readdirplus3, 4, false},
-	v3FSStat:      {"FSSTAT", (*Server).fsstat3, 4, false},
-	v3FSInfo:      {"FSINFO", (*Server).fsinfo3, 4, false},
-	v3PathConf:    {"PATHCONF", (*Server).pathconf3, 4, false},
-	v3Commit:      {"COMMIT", (*Server).commit3, 8, false},
+	v3GetAttr:     {"GETATTR", (*Server).getattr3, 0},
+	v3SetAttr:     {"SETATTR", (*Server).setattr3, 8},
+	v3Lookup:      {"LOOKUP", (*Server).lookup3, 4},
+	v3Access:      {"ACCESS", (*Server).access3, 4},
+	v3Readlink:    {"READLINK", (*Server).readlink3, 4},
+	v3Read:        {"READ", (*Server).read3, 4},
+	v3Write:       {"WRITE", (*Server).write3, 8},
+	v3Create:      {"CREATE", (*Server).create3, 8},
+	v3Mkdir:       {"MKDIR", (*Server).mkdir3, 8},
+	v3Symlink:     {"SYMLINK", (*Server).symlink3, 8},
+	v3Mknod:       {"MKNOD", (*Server).mknod3, 8},
+	v3Remove:      {"REMOVE", (*Server).remove3, 8},
+	v3Rmdir:       {"RMDIR", (*Server).rmdir3, 8},
+	v3Rename:      {"RENAME", (*Server).rename3, 16},
+	v3Link:        {"LINK", (*Server).link3, 12},
+	v3ReadDir:     {"READDIR", (*Server).readdir3, 4},
+	v3ReadDirPlus: {"READDIRPLUS", (*Server).readdirplus3, 4},
+	v3FSStat:      {"FSSTAT", (*Server).fsstat3, 4},
+	v3FSInfo:      {"FSINFO", (*Server).fsinfo3, 4},
+	v3PathConf:    {"PATHCONF", (*Server).pathconf3, 4},
+	v3Commit:      {"COMMIT", (*Server).commit3, 8},
 }
 
 // nfs3 answers NFSv3 calls.
@@ -124,9 +122,6 @@ func (s *Server) nfs3(c *call, res *encoder) acceptStat {
 	began := timer.Start()
 	st := p.run(s, &c.args, res)
 	timer.Since(began)
-	if p.namespace {
-		s.changes.invalidate()
-	}
 	if c.args.err != nil {
 		return rpcGarbageArgs
 	}

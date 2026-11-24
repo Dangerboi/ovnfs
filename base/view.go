@@ -193,21 +193,36 @@ func (v bottom) ReadDir(p string) ([]os.FileInfo, error) {
 // captured blob (from memory when the store caches it), or the object an LFS
 // pointer blob names (see lfsFile).
 func (v bottom) Open(p string) (overlay.Content, error) {
+	c, _, err := v.OpenInfo(p)
+	if err != nil {
+		return nil, err
+	}
+	if c == nil {
+		return nil, &fs.PathError{Op: "open", Path: overlay.Clean(p), Err: syscall.EISDIR}
+	}
+	return c, nil
+}
+
+// OpenInfo resolves p once and opens its regular-file content alongside its
+// FileInfo (overlay.InfoOpener). Non-regular entries return (nil, info, nil).
+func (v bottom) OpenInfo(p string) (overlay.Content, os.FileInfo, error) {
 	b := v.b
 	p = overlay.Clean(p)
 	e, err := v.resolve(p)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !e.info.Mode().IsRegular() {
-		return nil, &fs.PathError{Op: "open", Path: p, Err: syscall.EISDIR}
+		return nil, e.info, nil
 	}
 	if e.snapshot {
 		// The snapshot is the checkout's own and never changes.
-		return v.c.files.openFile(p)
+		c, err := v.c.files.openFile(p)
+		return c, e.info, err
 	}
 	if e.fenced {
-		return v.openFenced(p, e)
+		c, err := v.openFenced(p, e)
+		return c, e.info, err
 	}
 	if e.host != "" {
 		f, err := hostfile.Open(e.host)
@@ -215,13 +230,16 @@ func (v bottom) Open(p string) (overlay.Content, error) {
 			// Between lstat and open the folder may have changed; the open
 			// file must be the inode that matched.
 			if opened, statErr := f.Stat(); statErr == nil && os.SameFile(e.info.(hostInfo).FileInfo, opened) && opened.Size() == e.info.Size() && opened.ModTime().Equal(e.info.ModTime()) {
-				return &sourceFile{b: b, path: p, node: e.n, host: f, info: opened}, nil
+				return &sourceFile{b: b, path: p, node: e.n, host: f, info: opened}, e.info, nil
 			}
 			f.Close()
 		}
 	}
-	return b.capturedFile(p, e.n)
+	c, err := b.capturedFile(p, e.n)
+	return c, e.info, err
 }
+
+var _ overlay.InfoOpener = bottom{}
 
 // capturedFile opens the immutable backing for a source leaf.
 func (b *Base) capturedFile(p string, n uint32) (overlay.Content, error) {

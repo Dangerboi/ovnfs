@@ -484,3 +484,55 @@ func TestVanishedCacheHandleNFS(t *testing.T) {
 	_, st, err = c.GetAttr(rlibFH)
 	nfsStatus(t, st, nfstest.Stale, err)
 }
+
+// TestCachedFencedReadDetectsHostChangeNFS verifies that a fenced cache-root
+// descriptor cached by NFSv3 READ still fails STALE once the host modifies the
+// backing file, for both data reads and reads at or past EOF (n == 0).
+func TestCachedFencedReadDetectsHostChangeNFS(t *testing.T) {
+	f := newStack(t, map[string]string{
+		"source.rs":                 "fn main() {}",
+		"target/CACHEDIR.TAG":       "Signature: 8a477f597d28d172789f06886806bc55\n",
+		"target/release/deps/a.bin": "old-aaa",
+		"target/release/deps/b.bin": "old-bbb",
+	})
+	oldTime := time.Now().Add(-time.Hour).Truncate(time.Second)
+	for _, rel := range []string{"target/release/deps/a.bin", "target/release/deps/b.bin"} {
+		host := filepath.Join(f.lower, filepath.FromSlash(rel))
+		if err := os.Chtimes(host, oldTime, oldTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.create(t, "app")
+	c := nfstest.Start(t, f.export.NFS())
+	depsFH := lookup(t, c, "app/target/release/deps")
+	aFH, _, st, err := c.Lookup(depsFH, "a.bin")
+	nfsStatus(t, st, nfstest.OK, err)
+	bFH, _, st, err := c.Lookup(depsFH, "b.bin")
+	nfsStatus(t, st, nfstest.OK, err)
+
+	// Populate and hit the NFSv3 reader cache for both fenced files.
+	nfsRead(t, c, aFH, "old-aaa")
+	nfsRead(t, c, aFH, "old-aaa")
+	nfsRead(t, c, bFH, "old-bbb")
+
+	// Host rewrites both files after the fence.
+	if err := os.WriteFile(filepath.Join(f.lower, "target/release/deps/a.bin"), []byte("new-aaa"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.lower, "target/release/deps/b.bin"), []byte("new-bbb"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both a data read and an EOF read (off >= size) must fail STALE.
+	_, _, st, err = c.Read(aFH, 0, 64)
+	nfsStatus(t, st, nfstest.Stale, err)
+	_, _, st, err = c.Read(bFH, 64, 64)
+	nfsStatus(t, st, nfstest.Stale, err)
+
+	// Truncating a vanished handle still materializes an upper file that reads back.
+	_, st, err = c.SetSize(aFH, 0)
+	nfsStatus(t, st, nfstest.OK, err)
+	_, _, st, err = c.Write(aFH, 0, []byte("upper-aaa"), nfstest.FileSync)
+	nfsStatus(t, st, nfstest.OK, err)
+	nfsRead(t, c, aFH, "upper-aaa")
+}
