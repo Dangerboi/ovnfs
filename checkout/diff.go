@@ -40,7 +40,7 @@ func (r *Registry) liveTree(h *checkoutRecord) (*tree, error) {
 	}
 	upper, err := overlay.IndexUpper(h.upper)
 	if err != nil {
-		return nil, err
+		return nil, failure("io", "reading writable files for checkout %s: %v", h.meta.Name, err)
 	}
 	t, err := newTree(h.base, nil, parent, overlayView{h.fs})
 	if err != nil {
@@ -537,6 +537,11 @@ func (r *Registry) Apply(ctx context.Context, args api.ApplyArgs) (api.ApplyRepl
 	if remote := h.base.view.Meta().Remote; remote != nil {
 		return api.ApplyReply{}, failure("invalid", "checkout %s is attached from %s; its folder is not on this machine", h.meta.Name, remote.Source)
 	}
+	release, err := r.lockFolderMerge(ctx, h)
+	if err != nil {
+		return api.ApplyReply{}, err
+	}
+	defer release()
 	if args.Branch == "" {
 		reply, _, err := r.mergeFiles(ctx, h, mergeOptions{dryRun: args.DryRun, atomic: args.Atomic})
 		return reply, err
@@ -578,22 +583,33 @@ func codedTransfer(err error) error {
 	return coded(err)
 }
 
+// lockFolderMerge protects both the checkout's merge state and the folder being
+// updated. PullFolder takes the same locks in this order.
+func (r *Registry) lockFolderMerge(ctx context.Context, h *checkoutRecord) (func(), error) {
+	h.merge.Lock()
+	release, err := r.applying.lock(ctx, h.base.view.Meta().Dir)
+	if err != nil {
+		h.merge.Unlock()
+		return nil, err
+	}
+	return func() {
+		release()
+		h.merge.Unlock()
+	}, nil
+}
+
 // mergeOptions shape one merge of a checkout's files into its folder.
 type mergeOptions struct {
 	dryRun bool
 	// atomic writes nothing unless a first pass finds no conflict.
 	atomic bool
-	// only, when not nil, keeps the merge to these paths; the changed paths
-	// outside it are counted instead.
-	only map[string]bool
+	land   *landFiles
 }
 
-// mergeFiles is Apply's merge of h's changed source paths into its folder, and
-// counts the changed paths that o.only left out.
+// mergeFiles merges h into its folder with both merge locks held. For land,
+// Git defines the paths being integrated, not the checkout's open-time diff.
 func (r *Registry) mergeFiles(ctx context.Context, h *checkoutRecord, o mergeOptions) (reply api.ApplyReply, left int, err error) {
 	root := h.base.view.Meta().Dir
-	h.merge.Lock()
-	defer h.merge.Unlock()
 	snap, err := r.Snap(ctx, api.SnapArgs{Checkout: h.meta.Name, Label: "apply", Wait: !o.dryRun})
 	if err != nil {
 		return api.ApplyReply{}, 0, err
@@ -638,21 +654,20 @@ func (r *Registry) mergeFiles(ctx context.Context, h *checkoutRecord, o mergeOpt
 		return api.ApplyReply{}, 0, coded(err)
 	}
 	bases.over(from, true)
-	release, err := r.applying.lock(ctx, root)
-	if err != nil {
-		return api.ApplyReply{}, 0, err
-	}
-	defer release()
+	baseRead, theirRead := h.base.view.Content, h.base.view.Content
 	var changes []api.Change
-	for _, c := range compare(from, to) {
-		if o.only == nil || o.only[c.Path] {
-			changes = append(changes, c)
-		} else {
-			left++
+	if o.land == nil {
+		changes = compare(from, to)
+	} else {
+		changes, left, err = o.land.plan(h, from, to, bases)
+		if err != nil {
+			return api.ApplyReply{}, 0, coded(err)
 		}
+		baseRead, theirRead = o.land.readBase, o.land.readTheirs
 	}
 	s := sides{ours: "in the source folder", theirs: "in the checkout",
 		labels: git.Labels{Ours: "folder", Base: "base", Theirs: "checkout " + h.meta.Name}}
+	allowMarkers := o.land == nil || !o.land.replayed
 	// pass merges every change, writing unless dry, and records in bases what
 	// the folder took.
 	pass := func(dry bool, bases folderBases) (api.ApplyReply, error) {
@@ -660,10 +675,14 @@ func (r *Registry) mergeFiles(ctx context.Context, h *checkoutRecord, o mergeOpt
 		seen := map[string]bool{}
 		for _, c := range changes {
 			seen[c.Path] = true
-			held, err := r.holdsPullMarkers(h, bases, c.Path, to[c.Path])
+			var held bool
+			var err error
+			if o.land == nil || !o.land.replayed {
+				held, err = r.holdsPullMarkers(h, bases, c.Path, to[c.Path])
+			}
 			o, reason := unresolved, "conflict markers from a pull are not resolved in the checkout"
 			if err == nil && !held {
-				o, reason, err = r.applyOne(ctx, h, root, c.Path, from[c.Path], to[c.Path], s, dry)
+				o, reason, err = r.applyOne(h, root, c.Path, from[c.Path], to[c.Path], baseRead, theirRead, s, dry, allowMarkers)
 			}
 			if err != nil {
 				return api.ApplyReply{}, coded(fmt.Errorf("%s: %w", c.Path, err))
@@ -672,7 +691,7 @@ func (r *Registry) mergeFiles(ctx context.Context, h *checkoutRecord, o mergeOpt
 			bases.afterApply(c.Path, to[c.Path], o)
 		}
 		err := reportPending(&reply, bases.marked, seen, func(p string) (bool, error) {
-			if o.only != nil && !o.only[p] {
+			if o.land != nil && !o.land.includes(p) {
 				return false, nil
 			}
 			return hasMarkersAt(filepath.Join(root, filepath.FromSlash(p)))
@@ -699,6 +718,9 @@ func (r *Registry) mergeFiles(ctx context.Context, h *checkoutRecord, o mergeOpt
 		reply.Refused = o.atomic && len(reply.Conflicts) != 0
 		return reply, left, nil
 	}
+	if o.land != nil && o.land.replayed {
+		return reply, left, nil // the original checkout was not replayed
+	}
 	read := func(p string, f store.File) ([]byte, error) { return h.base.view.Blob(p, f.ID) }
 	if err := r.setFolderBases(h, bases, read); err != nil {
 		return api.ApplyReply{}, 0, coded(err)
@@ -719,7 +741,7 @@ func (r *Registry) holdsPullMarkers(h *checkoutRecord, bases folderBases, p stri
 
 // applyOne brings one path of the folder to the checkout's version when that is safe,
 // writing conflict markers where both sides changed the same lines of a text file.
-func (r *Registry) applyOne(ctx context.Context, h *checkoutRecord, root, p string, base, theirs store.File, s sides, dry bool) (outcome, string, error) {
+func (r *Registry) applyOne(h *checkoutRecord, root, p string, base, theirs store.File, baseRead, theirRead func(string, store.OID) ([]byte, error), s sides, dry, allowMarkers bool) (outcome, string, error) {
 	dst := filepath.Join(root, filepath.FromSlash(p))
 	ours, isDir, err := leafAt(dst)
 	if err != nil {
@@ -738,7 +760,7 @@ func (r *Registry) applyOne(ctx context.Context, h *checkoutRecord, root, p stri
 		if dry {
 			return applied, "", nil
 		}
-		return applied, "", r.place(h, dst, p, theirs)
+		return applied, "", r.place(h, dst, p, theirs, theirRead)
 	}
 	why, text := s.conflict(base, ours, theirs)
 	if !text {
@@ -750,15 +772,18 @@ func (r *Registry) applyOne(ctx context.Context, h *checkoutRecord, root, p stri
 	}
 	var baseData []byte
 	if base.ID != "" {
-		if baseData, err = h.base.view.Content(p, base.ID); err != nil {
+		if baseData, err = baseRead(p, base.ID); err != nil {
 			return 0, "", err
 		}
 	}
-	theirData, err := h.base.view.Content(p, theirs.ID)
+	theirData, err := theirRead(p, theirs.ID)
 	if err != nil {
 		return 0, "", err
 	}
 	result, o, reason := mergeText(s.labels, current, baseData, theirData, why)
+	if !allowMarkers && o == marked {
+		return conflict, reason, nil
+	}
 	if dry || (o != merged && o != marked) {
 		return o, reason, nil
 	}
@@ -803,7 +828,7 @@ func leafAt(name string) (store.File, bool, error) {
 }
 
 // place writes the checkout's version of a path into the folder, or deletes it.
-func (r *Registry) place(h *checkoutRecord, dst, p string, f store.File) error {
+func (r *Registry) place(h *checkoutRecord, dst, p string, f store.File, read func(string, store.OID) ([]byte, error)) error {
 	if f.ID == "" {
 		err := os.Remove(dst)
 		if errors.Is(err, os.ErrNotExist) {
@@ -818,7 +843,7 @@ func (r *Registry) place(h *checkoutRecord, dst, p string, f store.File) error {
 	return writeAtomic(dst, func(tmp string) error {
 		switch {
 		case f.Mode == store.ModeSymlink:
-			target, err := h.base.view.Blob(p, f.ID)
+			target, err := read(p, f.ID)
 			if err != nil {
 				return err
 			}
@@ -828,7 +853,7 @@ func (r *Registry) place(h *checkoutRecord, dst, p string, f store.File) error {
 		default:
 			// An LFS leaf's work-tree bytes are its object, even where the
 			// store holds the pointer blob too.
-			data, err := h.base.view.Content(p, f.ID)
+			data, err := read(p, f.ID)
 			if err != nil {
 				return err
 			}

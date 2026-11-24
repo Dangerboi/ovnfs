@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stencil-hq/ovnfs/api"
@@ -119,6 +120,106 @@ func TestLandKeepsTheFoldersEdits(t *testing.T) {
 	again, err := f.reg.Land(ctx, api.LandArgs{Checkout: "work"})
 	if err != nil || again.Old != want || again.Commit != want || len(again.Applied)+len(again.Merged) != 0 {
 		t.Errorf("landing again = %+v, %v; want nothing to land", again, err)
+	}
+}
+
+// TestLandAfterCheckoutMovesPastCapture distinguishes rebased, inherited
+// changes from dirty folder edits and uncommitted checkout paths.
+func TestLandAfterCheckoutMovesPastCapture(t *testing.T) {
+	f := newLandFixture(t, "HEAD")
+	write(t, filepath.Join(f.dir, "a.txt"), "upstream\ntwo\nthree\n")
+	write(t, filepath.Join(f.dir, "b.txt"), "upstream b\n")
+	gitRun(t, f.dir, "commit", "-qam", "upstream advanced")
+	gitRun(t, f.work, "--git-dir", f.gitdir("work"), "--work-tree", f.work, "reset", "--hard", gitRun(t, f.dir, "rev-parse", "HEAD"))
+	f.put("work", "b.txt", "upstream b\n")
+	want := f.commit("after sync", map[string]string{"a.txt": "checkout\ntwo\nthree\n"})
+	f.put("work", "wip.txt", "uncommitted\n")
+	reply, err := f.reg.Land(t.Context(), api.LandArgs{Checkout: "work"})
+	if err != nil || reply.Commit != want || reply.Refused || reply.Left != 1 {
+		t.Fatalf("land after sync = %+v, %v; want one uncommitted path left", reply, err)
+	}
+	if got := gitRun(t, f.dir, "status", "--porcelain"); got != "" {
+		t.Errorf("land left the folder dirty: %s", got)
+	}
+}
+
+// TestLandSerializesFolderUpdates ensures two sibling land operations do not
+// both pass preflight at the same tip and leave the losing files in the folder.
+func TestLandSerializesFolderUpdates(t *testing.T) {
+	f := newLandFixture(t, "HEAD")
+	f.commit("first checkout", map[string]string{"a.txt": "first\n"})
+	f.newCheckout(f.dir, "other")
+	f.put("other", "b.txt", "second\n")
+	other := t.TempDir()
+	write(t, filepath.Join(other, "b.txt"), "second\n")
+	gitRun(t, other, "--git-dir", f.gitdir("other"), "--work-tree", other, "add", "b.txt")
+	gitRun(t, other, "--git-dir", f.gitdir("other"), "--work-tree", other, "commit", "-qm", "other checkout")
+
+	var group sync.WaitGroup
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, name := range []string{"work", "other"} {
+		group.Go(func() {
+			<-start
+			reply, err := f.reg.Land(t.Context(), api.LandArgs{Checkout: name})
+			if reply.Refused {
+				t.Errorf("land %s unexpectedly encountered file conflicts: %+v", name, reply)
+			}
+			results <- err
+		})
+	}
+	close(start)
+	group.Wait()
+	first, second := <-results, <-results
+	if (first == nil) == (second == nil) {
+		t.Fatalf("land errors = %v, %v; want exactly one success", first, second)
+	}
+	if got := gitRun(t, f.dir, "status", "--porcelain"); got != "" {
+		t.Errorf("the losing checkout left edits in the folder: %s", got)
+	}
+}
+
+// TestLandRebase keeps the original checkout and its commit, while integrating
+// the isolated replay and refusing both source edits and replay conflicts.
+func TestLandRebase(t *testing.T) {
+	for _, scenario := range []string{"clean", "dirty", "conflict"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newLandFixture(t, "HEAD")
+			tip := f.commit("checkout edit", map[string]string{"a.txt": "checkout\ntwo\nthree\n"})
+			main := "b.txt"
+			if scenario == "conflict" {
+				main = "a.txt"
+			}
+			write(t, filepath.Join(f.dir, main), "folder advanced\n")
+			gitRun(t, f.dir, "commit", "-qam", "folder commit")
+			old := gitRun(t, f.dir, "rev-parse", "HEAD")
+			if scenario == "dirty" {
+				f.put("work", "wip.txt", "do not replay this\n")
+			}
+			reply, err := f.reg.Land(t.Context(), api.LandArgs{Checkout: "work", Rebase: true})
+			if scenario != "clean" {
+				if e, ok := errors.AsType[*Error](err); !ok || e.Code != "conflict" {
+					t.Fatalf("replay = %+v, %v; want a conflict", reply, err)
+				}
+				if got := gitRun(t, f.dir, "rev-parse", "HEAD"); got != old {
+					t.Fatalf("failed replay moved folder HEAD to %s", got)
+				}
+			} else {
+				if err != nil || reply.Commit == tip || reply.ReplayedFrom != tip || len(reply.Conflicts) != 0 {
+					t.Fatalf("replay = %+v, %v; want rewritten commit on the folder", reply, err)
+				}
+				if f.folderFile("a.txt") != "checkout\ntwo\nthree\n" || gitRun(t, f.dir, "rev-parse", "HEAD^") != old ||
+					gitRun(t, f.dir, "status", "--porcelain") != "" {
+					t.Fatal("replay did not update folder files, index and branch together")
+				}
+			}
+			if got := gitRun(t, f.work, "--git-dir", f.gitdir("work"), "rev-parse", "HEAD"); got != tip {
+				t.Fatalf("original checkout HEAD = %s, want %s", got, tip)
+			}
+			if got := f.read("work", "a.txt"); got != "checkout\ntwo\nthree\n" {
+				t.Fatalf("original checkout file changed: %s", got)
+			}
+		})
 	}
 }
 

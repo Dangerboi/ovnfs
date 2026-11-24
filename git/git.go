@@ -60,6 +60,15 @@ func Open(dir string) (*Repo, error) {
 	return newRepo(h), nil
 }
 
+// OpenPrivate opens a checkout's private Git directory without using its mount.
+func OpenPrivate(gitdir string) (*Repo, error) {
+	h, err := repo.Open(gitdir)
+	if err != nil {
+		return nil, err
+	}
+	return newRepo(h), nil
+}
+
 // IsRoot reports whether dir holds a .git entry, the cheap check made before Open while walking.
 func IsRoot(dir string) bool {
 	_, err := os.Lstat(filepath.Join(dir, ".git"))
@@ -154,6 +163,46 @@ func (r *Repo) ReadIndex(name string) (Index, error) {
 		})
 	}
 	return out, nil
+}
+
+// IndexMatches checks that the private index represents commit exactly and no
+// rebase, merge or sequencer operation is already in progress.
+func (r *Repo) IndexMatches(ctx context.Context, commit string) (bool, error) {
+	for _, state := range []string{"rebase-merge", "rebase-apply", "sequencer", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"} {
+		if _, err := os.Lstat(filepath.Join(r.GitDir, state)); !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+	}
+	id, err := object.ParseIDFormat(r.repo.Format, commit)
+	if err != nil {
+		return false, err
+	}
+	objects, err := r.repo.OpenObjects()
+	if err != nil {
+		return false, err
+	}
+	defer objects.Close()
+	got, err := index.Read(r.IndexPath(), r.repo.Format, index.ReadOptions{ExpandSparse: treeReader(objects)})
+	if err != nil {
+		return false, err
+	}
+	tree, err := objects.Peel(id, object.Tree)
+	if err != nil {
+		return false, err
+	}
+	want, err := index.FromTree(treeReader(objects), tree, r.repo.Format)
+	if err != nil {
+		return false, err
+	}
+	if len(got.Entries) != len(want.Entries) {
+		return false, nil
+	}
+	for i, e := range got.Entries {
+		if e.Stage != 0 || e.IntentToAdd || e.Path != want.Entries[i].Path || e.Mode != want.Entries[i].Mode || e.ID != want.Entries[i].ID {
+			return false, nil
+		}
+	}
+	return true, ctx.Err()
 }
 
 // isIndexedAttrFile reports a stage-0 .gitattributes entry that holds a regular file's blob.

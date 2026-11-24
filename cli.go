@@ -526,13 +526,14 @@ type landCmd struct {
 	Checkout string `arg:"" name:"CHECKOUT" help:"checkout whose commits to land" completion-predictor:"checkout"`
 	DryRun   bool   `name:"dry-run" help:"report without writing"`
 	Markers  bool   `name:"markers" help:"where a file conflicts with the folder's uncommitted edits, write conflict markers there instead of refusing"`
+	Rebase   bool   `name:"rebase" help:"replay a clean checkout's commits onto the moved branch without rewriting the checkout"`
 }
 
 func (cmd *landCmd) Run(c *cli) error {
-	a := api.LandArgs{Checkout: cmd.Checkout, DryRun: cmd.DryRun, Markers: cmd.Markers}
+	a := api.LandArgs{Checkout: cmd.Checkout, DryRun: cmd.DryRun, Markers: cmd.Markers, Rebase: cmd.Rebase}
 	r, err := call[api.LandReply](c, "land", a)
 	if err != nil {
-		return c.predates(err, true, "land", "land")
+		return c.predates(c.predates(err, true, "land", "land"), a.Rebase, "land.rebase", "land --rebase")
 	}
 	again := paint(stderr, styleAccent, "ovnfs land "+a.Checkout)
 	if c.json {
@@ -552,6 +553,11 @@ func (cmd *landCmd) Run(c *cli) error {
 			paint(stderr, styleYellow, "nothing landed"), plural(len(r.Conflicts), "file still has", "files still have"), r.Source, again)
 		return exitCode(1)
 	case r.Refused:
+		if a.Rebase {
+			fmt.Fprintf(stderr, "nothing landed: %s with uncommitted changes in %s; the checkout was not rewritten\n",
+				plural(len(r.Conflicts), "file conflicts", "files conflict"), r.Source)
+			return exitCode(1)
+		}
 		line := fmt.Sprintf("%s: %s with uncommitted changes in %s; `%s` writes conflict markers there to resolve, then `%s`",
 			paint(stderr, styleYellow, "nothing landed"), plural(len(r.Conflicts), "file conflicts", "files conflict"), r.Source,
 			paint(stderr, styleAccent, "ovnfs land "+a.Checkout+" --markers"), again)
@@ -561,17 +567,28 @@ func (cmd *landCmd) Run(c *cli) error {
 		fmt.Fprintln(stderr, line)
 		return exitCode(1)
 	case len(r.Conflicts) != 0:
+		if a.Rebase {
+			fmt.Fprintln(stderr, "the folder changed during the replay merge; its branch did not move; inspect its uncommitted edits before retrying")
+			return exitCode(1)
+		}
 		// Markers were asked for, or the folder changed under an atomic merge.
 		fmt.Fprintf(stderr, "%s: %s conflict markers in %s; resolve them, then `%s`\n",
 			paint(stderr, styleYellow, r.Branch+" did not move"), plural(len(r.Conflicts), "file has", "files have"), r.Source, again)
 		return exitCode(1)
 	case r.Commit == r.Old:
+		if r.ReplayedFrom != "" {
+			fmt.Fprintf(stderr, "nothing to land: replay produced no new commits; checkout %s is unchanged\n", a.Checkout)
+			return nil
+		}
 		fmt.Fprintf(stderr, "%s: %s holds no commit beyond %s; `%s` merges its uncommitted changes\n",
 			paint(stderr, styleYellow, "nothing to land"), a.Checkout, r.Branch, paint(stderr, styleAccent, "ovnfs apply "+a.Checkout))
 		return nil
 	}
 	fmt.Fprintf(stdout, "%s %s %s %s %s\n", paint(stdout, styleDim, "branch"), paint(stdout, styleAccent, r.Branch), paint(stdout, styleDim, "at"),
 		paint(stdout, styleDim, abbrev(r.Commit, 12)), paint(stdout, styleDim, "(was "+abbrev(r.Old, 12)+")"))
+	if r.ReplayedFrom != "" {
+		fmt.Fprintf(stderr, "replayed from %s; checkout %s still holds the original commits\n", abbrev(r.ReplayedFrom, 12), a.Checkout)
+	}
 	if r.Left > 0 {
 		fmt.Fprintf(stderr, "%s in %s outside those commits; `%s` merges them as uncommitted edits\n",
 			paint(stderr, styleYellow, plural(r.Left, "path stays changed", "paths stay changed")), a.Checkout, paint(stderr, styleAccent, "ovnfs apply "+a.Checkout))

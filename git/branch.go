@@ -102,6 +102,17 @@ type branchUpdate struct {
 // only its index advances with it, and only where nothing is staged; the work
 // tree is never touched.
 func (r *Repo) FetchBranch(ctx context.Context, gitdir, branch string, dryRun bool) (string, []BranchChange, error) {
+	return r.fetchBranch(ctx, gitdir, branch, "", "", dryRun)
+}
+
+// LandBranch checks or advances the checked-out branch for exactly the
+// integration plan's original folder and checkout tips. The caller must
+// have copied tip before advancing the branch.
+func (r *Repo) LandBranch(ctx context.Context, gitdir, branch, before, tip string, dryRun bool) (string, []BranchChange, error) {
+	return r.fetchBranch(ctx, gitdir, branch, before, tip, dryRun)
+}
+
+func (r *Repo) fetchBranch(ctx context.Context, gitdir, branch, before, want string, dryRun bool) (string, []BranchChange, error) {
 	if err := refs.CheckBranchName(branch); err != nil {
 		return "", nil, err
 	}
@@ -116,6 +127,9 @@ func (r *Repo) FetchBranch(ctx context.Context, gitdir, branch string, dryRun bo
 		return "", nil, err
 	}
 	if head != ref {
+		if before != "" {
+			return "", nil, &BranchConflict{Branch: branch}
+		}
 		if dryRun {
 			return "", nil, ErrBranchDryRun
 		}
@@ -161,6 +175,9 @@ func (r *Repo) FetchBranch(ctx context.Context, gitdir, branch string, dryRun bo
 		return "", nil, err
 	}
 	old := tip.ID
+	if before != "" && old.String() != before {
+		return "", nil, &BranchConflict{Branch: branch}
+	}
 	srcObjects, err := src.OpenObjects()
 	if err != nil {
 		return "", nil, err
@@ -173,6 +190,9 @@ func (r *Repo) FetchBranch(ctx context.Context, gitdir, branch string, dryRun bo
 	next, err := rev.Resolve(&s, "HEAD^{commit}", rev.Options{})
 	if err != nil {
 		return "", nil, err
+	}
+	if want != "" && want != next.String() {
+		return "", nil, fmt.Errorf("checkout HEAD changed from %s to %s", want, next)
 	}
 	// The private git directory reads r's objects through alternates, so it
 	// holds both commits.
@@ -267,8 +287,10 @@ func (r *Repo) FetchBranch(ctx context.Context, gitdir, branch string, dryRun bo
 	if dryRun || old == next {
 		return next.String(), changes, nil
 	}
-	if err := r.transfer(ctx, src, gitdir, next); err != nil {
-		return "", nil, err
+	if before == "" {
+		if err := r.transfer(ctx, src, gitdir, next); err != nil {
+			return "", nil, err
+		}
 	}
 	if len(updates) == 0 {
 		return next.String(), changes, r.updateBranch(ref, next, old, "")
@@ -410,9 +432,25 @@ func (r *Repo) CurrentBranch() (string, error) {
 // FetchBranch that can fail for reasons outside r, done ahead of changes that
 // are not easily taken back.
 func (r *Repo) FetchCommits(ctx context.Context, gitdir string) error {
+	return r.copyCommit(ctx, gitdir, "")
+}
+
+// CopyCommit transfers a pinned commit, without moving any ref.
+func (r *Repo) CopyCommit(ctx context.Context, gitdir, commit string) error {
+	return r.copyCommit(ctx, gitdir, commit)
+}
+
+func (r *Repo) copyCommit(ctx context.Context, gitdir, commit string) error {
 	src, err := repo.Open(gitdir)
 	if err != nil {
 		return err
+	}
+	if commit != "" {
+		id, err := object.ParseIDFormat(src.Format, commit)
+		if err != nil {
+			return err
+		}
+		return r.transfer(ctx, src, gitdir, id)
 	}
 	head, err := src.Refs().Resolve("HEAD")
 	if err != nil {

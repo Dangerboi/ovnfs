@@ -18,10 +18,10 @@ var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob"
 // "pull.folder" (a pull of a checkout without attachments merges its folder),
 // "apply.atomic" (ApplyArgs.Atomic), "rm.keep_commits" (RmArgs.KeepCommits),
 // "diff.paths" (DiffArgs.Paths), "diff.stat" (DiffArgs.Stat),
-// "new.base_checkout" (NewArgs.Base takes a checkout's name), and
-// "glob.git_markers" (GlobArgs.GitMarkers).
+// "new.base_checkout" (NewArgs.Base takes a checkout's name),
+// "glob.git_markers" (GlobArgs.GitMarkers), and "land.rebase" (LandArgs.Rebase).
 var Features = []string{"new.base", "diff.binary", "ls.select", "rm.sticky_snapshots", "prune.sticky_snapshots", "stop.keep_mount",
-	"pull.folder", "apply.atomic", "rm.keep_commits", "diff.paths", "diff.stat", "new.base_checkout", "glob.git_markers"}
+	"pull.folder", "apply.atomic", "rm.keep_commits", "diff.paths", "diff.stat", "new.base_checkout", "glob.git_markers", "land.rebase"}
 
 // Checkout is an isolated, copy-on-write copy of a source folder that an agent works in.
 type Checkout struct {
@@ -279,6 +279,9 @@ type LandArgs struct {
 	// edits to be reconciled there; the branch then stays where it is until
 	// they are resolved and the checkout is landed again.
 	Markers bool `json:"markers,omitempty"`
+	// Rebase replays a clean checkout's commits in isolation if the folder
+	// branch advanced. It does not rewrite the original checkout.
+	Rebase bool `json:"rebase,omitempty"`
 }
 
 // LandReply reports the files land merged as ApplyReply does, with Branch
@@ -287,8 +290,9 @@ type LandArgs struct {
 // checkout changed outside those commits, which stay there for an apply.
 type LandReply struct {
 	ApplyReply
-	Old  string `json:"old"`
-	Left int    `json:"left,omitempty"`
+	Old          string `json:"old"`
+	Left         int    `json:"left,omitempty"`
+	ReplayedFrom string `json:"replayed_from,omitempty"` // original checkout HEAD after a successful isolated replay
 }
 
 // RmArgs removes a checkout and its unused snapshots unless StickySnapshots is

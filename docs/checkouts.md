@@ -390,9 +390,10 @@ fast-forwards to the checkout's HEAD, its index follows, and the checkout's
 files for the paths those commits changed merge into the folder, so the
 folder's uncommitted edits stay on top. `git status` there then shows those
 edits, and whatever the checkout itself left uncommitted in the same files,
-which comes along as it is. A path changed in the checkout outside those
-commits stays in the checkout; land counts them, and `apply` brings them as
-uncommitted edits.
+which comes along as it is. Edits outside those paths stay in the checkout;
+the count compares them to its current Git HEAD, not its original capture.
+If the folder's branch advanced and the checkout was rebased, paths changed
+by those intervening commits merge against their current committed version.
 
 Land refuses before it writes anything: when the folder's HEAD is detached
 (`apply --branch NAME` then brings the commits as a branch), when the branch
@@ -404,10 +405,21 @@ as apply does, leaving the branch where it is: resolve them and land again.
 Where the checkout can [pull](#pulling-the-folder-in-pull), pulling the
 folder's edits into it resolves the conflict there instead.
 
-The commits are copied before the files are merged, and the branch moves last,
-so a failure leaves at most merged files as uncommitted edits, which landing
-again completes. `apply CHECKOUT --branch NAME` remains for the other cases: it
-creates or fast-forwards a branch that is not checked out, touching no file.
+`land --rebase` can replay a clean checkout's commits when the folder's
+branch has advanced. It requires Git and refuses merge commits, staged or
+uncommitted source changes, and conflicting replays. It runs in isolation:
+the original checkout is never rewritten, even after success, so its
+original commit IDs still count for `rm` protection. Patches already present
+on the destination are skipped as in a normal Git rebase. If the replay
+conflicts, rebase manually inside the checkout. `--dry-run` previews a
+replay, and `--markers` cannot be combined with it.
+
+ovnfs serializes merges into the same folder from preflight through the ref
+update. The commits are copied before the files are merged, and the branch
+moves last. External edits or Git commands can still invalidate the plan; a
+late ref failure leaves any merged files as uncommitted edits rather than
+advancing the branch against a different tip. `apply CHECKOUT --branch NAME`
+can create or fast-forward a branch that is not checked out, touching no file.
 
 ## Pulling the folder in: `pull`
 
