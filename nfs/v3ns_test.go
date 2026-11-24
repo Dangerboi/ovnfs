@@ -73,7 +73,9 @@ func xdrOpaque(dst, b []byte) []byte {
 // handle is the wire form of file id's handle at generation 0, which
 // testFS ids have until RetireHandle.
 func handle(id uint64) []byte {
-	return binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, id), 0)
+	var e encoder
+	e.fh(id, 0)
+	return e.buf[4:]
 }
 
 // raw appends pre-encoded arguments.

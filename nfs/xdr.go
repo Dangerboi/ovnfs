@@ -141,6 +141,8 @@ func (e *encoder) fh(id, gen uint64) {
 	e.u32(fhSize)
 	e.u64(id)
 	e.u64(gen)
+	pad := fhSpread(id, gen)
+	e.buf = append(e.buf, pad[:]...)
 }
 
 // opaqueFrom appends variable-length opaque data of at most n bytes that

@@ -10,9 +10,14 @@ import (
 	"strconv"
 )
 
-// darwinNFSOptions keeps locking local and the mount out of Finder.
+// darwinNFSOptions keeps locking local, hides the mount from Finder, and
+// disables READDIRPLUS. With READDIRPLUS, the macOS NFS client calls nfs_nget
+// under its global node-hash mutex for every listed entry, turning invalidated
+// listings of large build directories into a kernel-CPU bottleneck; plain
+// READDIR avoids that work (at the cost of LOOKUPs for name-only walkers that
+// ask for entry types).
 func darwinNFSOptions(noIntr bool) string {
-	const common = "locallocks,nobrowse,"
+	const common = "locallocks,nobrowse,nordirplus,"
 	if noIntr {
 		// A soft timeout can also fail a mapped-file page-in.
 		return common + "hard,nointr"

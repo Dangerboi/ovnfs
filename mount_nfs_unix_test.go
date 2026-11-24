@@ -14,11 +14,11 @@ func TestNFSMountMismatch(t *testing.T) {
 			"Original mount options": {"NFS parameters": ["rsize=1048576", "wsize=1048576"]},
 			"Current mount parameters": {
 				"General mount flags": {"Flags": ["noatime", "nobrowse", "nodev", "nosuid"]},
-				"NFS parameters": ["vers=3", "ticotsord", "port=/state/nfs.sock", "mountport=/state/nfs.sock", "hard", "intr", "locallocks", "rsize=131072", "wsize=131072", "readahead=16"]
+				"NFS parameters": ["vers=3", "ticotsord", "port=/state/nfs.sock", "mountport=/state/nfs.sock", "hard", "intr", "locallocks", "nordirplus", "rsize=131072", "wsize=131072", "readahead=16"]
 			}
 		}
 	}`
-	const options = "vers=3,port=/state/nfs.sock,mountport=/state/nfs.sock,locallocks,nobrowse,intr,rwsize=131072,noatime"
+	const options = "vers=3,port=/state/nfs.sock,mountport=/state/nfs.sock,locallocks,nobrowse,nordirplus,intr,rwsize=131072,noatime"
 	noIntrReport := strings.Replace(report, `"intr"`, `"nointr"`, 1)
 	noIntrOptions := strings.Replace(options, ",intr,", ",hard,nointr,", 1)
 	for _, tc := range []struct {
@@ -29,6 +29,7 @@ func TestNFSMountMismatch(t *testing.T) {
 		{name: "read size", data: strings.Replace(report, "rsize=131072", "rsize=1048576", 1), options: options, mismatch: "rsize="},
 		{name: "write size", data: strings.Replace(report, "wsize=131072", "wsize=1048576", 1), options: options, mismatch: "wsize="},
 		{name: "missing required flag", data: strings.Replace(report, `"intr",`, "", 1), options: options, mismatch: "intr"},
+		{name: "rdirplus mount replaced when nordirplus required", data: strings.Replace(report, `"nordirplus"`, `"rdirplus"`, 1), options: options, mismatch: "missing nordirplus"},
 		{name: "keeps hard nointr mount", data: noIntrReport, options: noIntrOptions},
 		{name: "enabling nointr replaces interruptible mount", data: report, options: noIntrOptions, mismatch: "missing nointr"},
 		{name: "disabling nointr replaces non-interruptible mount", data: noIntrReport, options: options, mismatch: "missing intr"},

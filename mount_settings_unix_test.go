@@ -31,6 +31,9 @@ func TestMountCommandNFSInterruptPolicy(t *testing.T) {
 			if !strings.Contains(o, tc.want) || strings.Contains(o, tc.reject) {
 				t.Errorf("%s nointr=%v: options %q, want %q without %q", addr.Network(), tc.noIntr, o, tc.want, tc.reject)
 			}
+			if !strings.Contains(o, ",nordirplus,") {
+				t.Errorf("%s nointr=%v: options %q missing nordirplus", addr.Network(), tc.noIntr, o)
+			}
 		}
 	}
 }

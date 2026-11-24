@@ -289,14 +289,16 @@ visible entry is stale. A protocol handle that outlives its file, its
 checkout or a daemon restart is answered as stale, and clients recover by
 looking the name up again.
 
-An NFS handle is 16 bytes: the file id and a generation, the checkout's life
+An NFS handle is 64 bytes: the file id, a generation — the checkout's life
 (a counter persisted with the slot, so a handle of a removed checkout never
 resolves into a later checkout in the same slot) and how often the server
-retired the id's handles. A client caching a larger size than the file has
-gets its handle retired, so it drops its cached pages, while the file keeps
-its fileid; a restart forgets these retirements. Handles of earlier builds
-(8 bytes) are stale, except the export root's, so a mount kept across the
-upgrade keeps working and looks everything below the root up again.
+retired the id's handles — and 48 bytes of deterministic padding whose byte
+sum spreads the handle across XNU's byte-sum `nfs_hash` buckets. A client
+caching a larger size than the file has gets its handle retired, so it drops
+its cached pages, while the file keeps its fileid; a restart forgets these
+retirements. Handles of earlier builds (8-byte id-only or 16-byte unpadded)
+are stale, except the export root's, so a mount kept across the upgrade keeps
+working and looks everything below the root up again.
 
 A path resolved for a handle can stop holding its file before the request
 uses it: a rename moves the file or puts another one there. A client that

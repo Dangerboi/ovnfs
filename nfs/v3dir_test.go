@@ -182,13 +182,13 @@ func TestV3ReaddirPaging(t *testing.T) {
 	for _, b := range []struct{ dircount, maxcount uint32 }{
 		{4096, 140}, {4096, 300}, {60, 8192}, {512, 1024}, {1 << 20, 1 << 20},
 	} {
-		got := names(t, pageAll(t, wire(c), false, dir, 0, b.maxcount+150))
+		got := names(t, pageAll(t, wire(c), false, dir, 0, b.maxcount+200))
 		if !slices.Equal(got, want) {
-			t.Errorf("READDIR count %d: %v", b.maxcount+150, got)
+			t.Errorf("READDIR count %d: %v", b.maxcount+200, got)
 		}
-		plus := pageAll(t, wire(c), true, dir, b.dircount, b.maxcount+150)
+		plus := pageAll(t, wire(c), true, dir, b.dircount, b.maxcount+200)
 		if got := names(t, plus); !slices.Equal(got, want) {
-			t.Errorf("READDIRPLUS %d/%d: %v", b.dircount, b.maxcount+150, got)
+			t.Errorf("READDIRPLUS %d/%d: %v", b.dircount, b.maxcount+200, got)
 		}
 		for _, e := range plus {
 			id := fs.FileID(path.Join("d", e.name))
@@ -258,7 +258,7 @@ func TestV3ReaddirChangesMidListing(t *testing.T) {
 	dir := fs.FileID("d")
 
 	for _, plus := range []bool{false, true} {
-		first := readdir3(t, call, plus, dir, 0, 0, 4096, 600)
+		first := readdir3(t, call, plus, dir, 0, 0, 4096, 800)
 		if first.st != stOK || first.eof || len(first.entries) < 3 {
 			t.Fatalf("first page: %+v", first)
 		}
@@ -271,7 +271,7 @@ func TestV3ReaddirChangesMidListing(t *testing.T) {
 		}
 		cookie := seen[len(seen)-1].cookie
 		for {
-			pg := readdir3(t, call, plus, dir, cookie, first.verf, 4096, 600)
+			pg := readdir3(t, call, plus, dir, cookie, first.verf, 4096, 800)
 			if pg.st != stOK || pg.verf != first.verf {
 				t.Fatalf("continuation after %q: %d", last, pg.st)
 			}

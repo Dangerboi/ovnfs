@@ -23,12 +23,13 @@ func TestMount(t *testing.T) {
 	for _, dirpath := range []string{"/", "/some/where", ""} {
 		stat, d := c.call(progMount, 3, mntMnt, func(e *encoder) { e.str(dirpath) })
 		root := fs.FileID("")
-		want := words(0, fhSize)
-		want = binary.BigEndian.AppendUint64(want, root)
-		want = binary.BigEndian.AppendUint64(want, fs.Generation(root))
-		want = append(want, words(1, authNone)...)
-		if stat != rpcSuccess || !bytes.Equal(d.buf, want) {
-			t.Errorf("MNT %q: accept_stat %d, result %x, want %x", dirpath, stat, d.buf, want)
+		var want encoder
+		want.u32(0)
+		want.fh(root, fs.Generation(root))
+		want.u32(1)
+		want.u32(authNone)
+		if stat != rpcSuccess || !bytes.Equal(d.buf, want.buf) {
+			t.Errorf("MNT %q: accept_stat %d, result %x, want %x", dirpath, stat, d.buf, want.buf)
 		}
 	}
 	export := words(1, 1)

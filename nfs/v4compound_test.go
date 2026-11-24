@@ -124,13 +124,24 @@ func TestV4FileHandles(t *testing.T) {
 	if s := c.run(v4PutFH(999)).status; s != stStale {
 		t.Fatalf("unknown id: status %d, want STALE", s)
 	}
-	// A client upgraded across the handle change still holds id-only
-	// handles: STALE makes it look the name up again.
-	if s := c.run(func(e *encoder) { e.u32(op4PutFH); e.opaque(binary.BigEndian.AppendUint64(nil, id)) }).status; s != stStale {
-		t.Fatalf("legacy 8-byte handle: status %d, want STALE", s)
-	}
-	if s := c.run(func(e *encoder) { e.u32(op4PutFH); e.opaque(binary.BigEndian.AppendUint64(nil, fs.FileID(""))) }).status; s != stOK {
-		t.Fatalf("legacy root handle: status %d, want OK", s)
+	// A client upgraded across a handle-format change still holds earlier
+	// handles (8-byte id-only or 16-byte unpadded): STALE makes it look the
+	// name up again, from the root, whose legacy handle stays valid.
+	for _, tc := range []struct {
+		name string
+		raw  func(uint64) []byte
+	}{
+		{"8-byte", func(fid uint64) []byte { return binary.BigEndian.AppendUint64(nil, fid) }},
+		{"16-byte", func(fid uint64) []byte {
+			return binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, fid), 0)
+		}},
+	} {
+		if s := c.run(func(e *encoder) { e.u32(op4PutFH); e.opaque(tc.raw(id)) }).status; s != stStale {
+			t.Fatalf("legacy %s handle: status %d, want STALE", tc.name, s)
+		}
+		if s := c.run(func(e *encoder) { e.u32(op4PutFH); e.opaque(tc.raw(fs.FileID(""))) }).status; s != stOK {
+			t.Fatalf("legacy %s root handle: status %d, want OK", tc.name, s)
+		}
 	}
 	if s := c.run(func(e *encoder) { e.u32(op4PutFH); e.fh(id, 1) }).status; s != stStale {
 		t.Fatalf("wrong generation: status %d, want STALE", s)

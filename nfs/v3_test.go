@@ -110,15 +110,27 @@ func TestV3HandlesAndNames(t *testing.T) {
 	if st, _ := c.v3call(v3GetAttr, func(e *encoder) { e.fh(999, 0) }); st != stStale {
 		t.Errorf("unknown id: %d, want STALE", st)
 	}
-	// A client upgraded across the handle change still holds id-only
-	// handles: STALE makes it look the name up again, from the root, whose
-	// legacy handle stays valid so a kept mount keeps working.
+	// A client upgraded across a handle-format change still holds earlier
+	// handles (8-byte id-only or 16-byte unpadded): STALE makes it look the
+	// name up again, from the root, whose legacy handle stays valid so a kept
+	// mount keeps working.
 	f := fs.FileID("f")
-	if st, _ := c.v3call(v3GetAttr, func(e *encoder) { e.opaque(binary.BigEndian.AppendUint64(nil, f)) }); st != stStale {
-		t.Errorf("legacy 8-byte handle: %d, want STALE", st)
-	}
-	if st, _ := c.v3call(v3GetAttr, func(e *encoder) { e.opaque(binary.BigEndian.AppendUint64(nil, fs.FileID(""))) }); st != stOK {
-		t.Errorf("legacy root handle: %d, want OK", st)
+	root := fs.FileID("")
+	for _, tc := range []struct {
+		name string
+		raw  func(uint64) []byte
+	}{
+		{"8-byte", func(id uint64) []byte { return binary.BigEndian.AppendUint64(nil, id) }},
+		{"16-byte", func(id uint64) []byte {
+			return binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, id), 0)
+		}},
+	} {
+		if st, _ := c.v3call(v3GetAttr, func(e *encoder) { e.opaque(tc.raw(f)) }); st != stStale {
+			t.Errorf("legacy %s handle: %d, want STALE", tc.name, st)
+		}
+		if st, _ := c.v3call(v3GetAttr, func(e *encoder) { e.opaque(tc.raw(root)) }); st != stOK {
+			t.Errorf("legacy %s root handle: %d, want OK", tc.name, st)
+		}
 	}
 	if st, _ := c.v3call(v3GetAttr, func(e *encoder) { e.fh(f, 0) }); st != stOK {
 		t.Errorf("current handle: %d", st)

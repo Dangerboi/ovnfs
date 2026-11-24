@@ -220,15 +220,45 @@ func accessOf(info os.FileInfo, want uint32) (supported, granted uint32) {
 }
 
 // fhSize is the length of every file handle this server issues: the file id,
-// then the generation Backend.Generation tagged it with, both big-endian.
-const fhSize = 16
+// then the generation Backend.Generation tagged it with, both big-endian,
+// then padding to NFS3_FHSIZE that spreads the handle's byte sum (fhSpread).
+const fhSize = 64
 
-// legacyFHSize is the length of the id-only handles earlier servers issued.
-// Clients still holding one after an upgrade get STALE, which makes them
-// look the name up again, rather than BADHANDLE, which they treat as fatal;
-// the export root's still resolves (Server.resolve), since a mount kept
-// across the upgrade reaches everything else through it.
-const legacyFHSize = 8
+// fhKeySize is the length of the part of a handle that identifies the file.
+const fhKeySize = 16
+
+// fhSpread returns the padding of the handle of file id at generation gen.
+//
+// The macOS NFS client hashes file handles by summing their bytes (nfs_hash
+// in Apple's nfs_node.c) and walks the bucket under one global mutex on every
+// lookup, create and READDIRPLUS entry. Sequential ids and checkout
+// generations sum to a few hundred distinct values, putting hundreds of nodes
+// in every bucket. Padding whose bytes sum to a hash of (id, gen) across
+// 0..len*255 gives the client about twenty times as many buckets.
+func fhSpread(id, gen uint64) (pad [fhSize - fhKeySize]byte) {
+	x := id ^ gen*0x9e3779b97f4a7c15
+	x ^= x >> 33
+	x *= 0xff51afd7ed558ccd
+	x ^= x >> 33
+	sum := int(x % uint64(len(pad)*255+1))
+	for i := range pad {
+		b := min(sum, 255)
+		pad[i] = byte(b)
+		sum -= b
+	}
+	return pad
+}
+
+// Legacy handle lengths that earlier servers issued: id-only (8 bytes) and
+// unpadded id+generation (16 bytes). Clients still holding one after an
+// upgrade get STALE, which makes them look the name up again, rather than
+// BADHANDLE, which they treat as fatal; the export root's still resolves
+// (Server.resolve), since a mount kept across the upgrade reaches everything
+// else through it.
+const (
+	legacyIDOnlyFHSize   = 8
+	legacyUnpaddedFHSize = 16
+)
 
 // legacyGen is the generation a legacy handle decodes to; no current handle
 // carries it.
@@ -241,7 +271,7 @@ func handleOf(fh []byte) (id, gen uint64, ok bool) {
 	switch len(fh) {
 	case fhSize:
 		return binary.BigEndian.Uint64(fh), binary.BigEndian.Uint64(fh[8:]), true
-	case legacyFHSize:
+	case legacyIDOnlyFHSize, legacyUnpaddedFHSize:
 		return binary.BigEndian.Uint64(fh), legacyGen, true
 	}
 	return 0, 0, false

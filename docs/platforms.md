@@ -18,7 +18,7 @@ directory, which only its user can open, and `mount_nfs` dials that socket
 (`port=` a path, netid `ticotsord`: undocumented, but in Apple's
 `mount_nfs.c`). When that mount fails, or `serve --listen` names a TCP address,
 it serves `127.0.0.1` on a free port and mounts with `noresvport`. The macOS
-mount uses `locallocks,nobrowse,intr,rwsize=131072` by default
+mount uses `locallocks,nobrowse,nordirplus,intr,rwsize=131072` by default
 ([`nfs_io_size`](configuration.md#where-the-daemon-lives) changes the size), `noatime` unless
 [`serve --atime`](configuration.md#where-the-daemon-lives), and normal
 attribute caching (the client's default timeouts are 5 to 60 s).
