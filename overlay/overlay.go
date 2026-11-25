@@ -2271,9 +2271,21 @@ func (f *file) Identity() ident.ID { return f.id }
 
 // Stat describes the open file with the identity of the entry it was opened as.
 func (f *file) Stat() (os.FileInfo, error) {
+	if f.fs != nil {
+		f.fs.mu.RLock()
+		defer f.fs.mu.RUnlock()
+	}
 	info, err := f.File.Stat()
 	if err != nil || f.id == 0 {
 		return info, err
+	}
+	// The namespace index can already show a queued link/unlink; its mode
+	// also carries permissions the native Windows descriptor cannot report.
+	if f.fs != nil && f.tracked {
+		if name := f.fs.aliases[f.inode].first; name != "" {
+			indexed := f.fs.index.entries[name].Info
+			info = linksOf(indexedMode(info, indexed), indexed)
+		}
 	}
 	return idInfo{FileInfo: info, id: f.id}, nil
 }

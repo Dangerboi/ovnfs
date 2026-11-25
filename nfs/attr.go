@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-git/go-billy/v5"
 	"github.com/stencil-hq/ovnfs/internal/unixstat"
 )
 
@@ -64,6 +65,19 @@ func attrsOf(id uint64, info os.FileInfo) attrs {
 // when p holds another file ([Server.lstatID]).
 func (s *Server) stat(id uint64, p string) (attrs, error) {
 	info, err := s.lstatID(id, p)
+	if err != nil {
+		return attrs{}, err
+	}
+	return attrsOf(id, info), nil
+}
+
+// fileAttrs describes file id from its previously identity-checked open descriptor.
+func (s *Server) fileAttrs(id uint64, f billy.File) (attrs, error) {
+	fd, ok := f.(interface{ Stat() (os.FileInfo, error) })
+	if !ok {
+		return attrs{}, billy.ErrNotSupported
+	}
+	info, err := fd.Stat()
 	if err != nil {
 		return attrs{}, err
 	}

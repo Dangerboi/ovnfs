@@ -75,7 +75,15 @@ func lstatIndexed(name string, indexed os.FileInfo) (os.FileInfo, error) {
 	if err != nil || indexed == nil || indexed.Mode().Type() != info.Mode().Type() {
 		return info, err
 	}
-	return keepIdentity(modeInfo{FileInfo: info, mode: indexed.Mode()}, indexed), nil
+	return keepIdentity(indexedMode(info, indexed), indexed), nil
+}
+
+// indexedMode restores the POSIX mode that Windows does not keep on the inode.
+func indexedMode(info, indexed os.FileInfo) os.FileInfo {
+	if indexed.Mode().Type() != info.Mode().Type() {
+		return info
+	}
+	return modeInfo{FileInfo: info, mode: indexed.Mode()}
 }
 
 // readMode reads name's mode stream; ok is false when it has none.

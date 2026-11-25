@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"syscall"
 
 	"github.com/go-git/go-billy/v5"
 	"github.com/stencil-hq/ovnfs/checkout"
@@ -95,6 +96,13 @@ func (f *routerFile) current(op string, s *checkout.Session) error {
 	if err != nil {
 		s.Done()
 		return err
+	}
+	// Copying up one frozen hard-link name can give it a fresh identity.
+	// A descriptor of the shared inode must not start writing the new one.
+	if f.identity != 0 && identityOf(next) != f.identity {
+		next.Close()
+		s.Done()
+		return &os.PathError{Op: op, Path: f.Name(), Err: syscall.ESTALE}
 	}
 	if _, err := next.Seek(f.offset, io.SeekStart); err != nil {
 		next.Close()

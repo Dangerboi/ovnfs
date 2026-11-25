@@ -23,6 +23,9 @@ func lstatIndexed(name string, indexed os.FileInfo) (os.FileInfo, error) {
 	return keepIdentity(info, indexed), nil
 }
 
+// indexedMode keeps the native POSIX mode from the descriptor.
+func indexedMode(info, _ os.FileInfo) os.FileInfo { return info }
+
 // withMode returns info: the host's mode is the file's.
 func withMode(_ string, info os.FileInfo) (os.FileInfo, error) { return info, nil }
 
