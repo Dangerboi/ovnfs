@@ -53,6 +53,11 @@ default it is mounted `noatime`, since the macOS NFS client otherwise sends a
 SETATTR for every exec of a checkout binary. A restart applies the setting to
 the existing mount; macOS NFS uses [mount reconciliation](platforms.md#nfs).
 
+`serve --idle-exit DUR` (`OVNFS_IDLE_EXIT`, default `10m`) unmounts and
+exits a daemon that has had no checkouts and no admin connection for that
+long, as a daemon auto-started for a test or under a scratch `HOME` ends up;
+the next command starts another. `0` keeps the daemon running.
+
 `serve --nfs-io-size SIZE` (`OVNFS_NFS_IO_SIZE`, user key `nfs_io_size`)
 sets NFS read/write transfers, default `128K`: powers of two from `4K` to `1M`
 are accepted; `0` uses the default. It applies to Unix-socket and TCP NFS mounts,
@@ -297,8 +302,8 @@ git_remotes: true
 For each setting, the explicit `serve` flag wins over its environment variable,
 which wins over the user file, which wins over the built-in default. The
 environment variables are `OVNFS_MEMORY`, `OVNFS_FSYNC`, `OVNFS_BLOB_CACHE`,
-`OVNFS_ATIME`, `OVNFS_NFS_IO_SIZE`, `OVNFS_NFS_NOINTR`, `OVNFS_NFS_XATTRS` and
-`OVNFS_GIT_REMOTES`;
+`OVNFS_ATIME`, `OVNFS_NFS_IO_SIZE`, `OVNFS_NFS_NOINTR`, `OVNFS_NFS_XATTRS`,
+`OVNFS_GIT_REMOTES` and `OVNFS_IDLE_EXIT`;
 `proto` has no environment variable.
 Serve settings take effect the next time the daemon starts.
 

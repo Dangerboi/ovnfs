@@ -53,6 +53,11 @@ type RemoteError struct {
 // Error describes the remote failure.
 func (e *RemoteError) Error() string { return e.Code + ": " + e.Message }
 
+// CodeRetired is the hello error of a daemon exiting after an idle period
+// (see Server.Hold): its socket closes shortly, and the client may start
+// another daemon.
+const CodeRetired = "retired"
+
 // invalidFrame identifies a consumed frame with malformed JSON.
 type invalidFrame struct{ err error }
 
@@ -130,6 +135,12 @@ type Server struct {
 	events func(context.Context) <-chan Event
 	// Logf, when set, reports each temporary accept error that Serve retries.
 	Logf func(format string, args ...any)
+
+	mu      sync.Mutex
+	conns   int           // connections being served
+	idle    time.Time     // when conns last fell to zero, or Ready ran
+	hold    chan struct{} // closed when a Hold ends; nil without one
+	retired bool          // hellos are answered with CodeRetired
 }
 
 // NewServer returns a server that holds every hello until Ready.
@@ -140,7 +151,62 @@ func NewServer() *Server {
 // Ready answers held and later hellos with w, and their requests with h. Call it once.
 func (s *Server) Ready(w Welcome, h Handler, events func(context.Context) <-chan Event) {
 	s.w, s.h, s.events = w, h, events
+	s.mu.Lock()
+	s.idle = time.Now()
+	s.mu.Unlock()
 	close(s.ready)
+}
+
+// Hold starts retiring a ready server that has had no connection for idle:
+// hellos then wait until Release. It reports false, and holds nothing, while
+// a connection is open or was within idle. Every connection counts, including
+// one that closes without a hello.
+func (s *Server) Hold(idle time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.conns > 0 || s.hold != nil || s.retired || s.idle.IsZero() || time.Since(s.idle) < idle {
+		return false
+	}
+	s.hold = make(chan struct{})
+	return true
+}
+
+// Release ends a Hold. With retire, held and later hellos are answered with
+// CodeRetired; otherwise they are welcomed and the idle period starts over.
+func (s *Server) Release(retire bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hold == nil {
+		return
+	}
+	close(s.hold)
+	s.hold, s.retired, s.idle = nil, retire, time.Now()
+}
+
+// admit waits out a Hold and reports whether hellos are still welcomed.
+func (s *Server) admit() bool {
+	s.mu.Lock()
+	hold := s.hold
+	s.mu.Unlock()
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-s.closed:
+			return false
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.retired
+}
+
+// leave ends a connection's activity.
+func (s *Server) leave() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.conns--; s.conns == 0 {
+		s.idle = time.Now()
+	}
 }
 
 // Serve accepts clients on l until it is closed. A connection still waiting
@@ -185,6 +251,10 @@ func (s *Server) serveConn(conn net.Conn) {
 	if err := CheckPeer(conn); err != nil {
 		return
 	}
+	s.mu.Lock()
+	s.conns++
+	s.mu.Unlock()
+	defer s.leave()
 	select {
 	case <-s.ready:
 	case <-s.closed:
@@ -210,6 +280,10 @@ func (s *Server) serveConn(conn net.Conn) {
 	}
 	hello, ok := first["hello"]
 	if !ok || !isObject(hello) {
+		return
+	}
+	if !s.admit() {
+		_ = send(map[string]any{"error": &RemoteError{Code: CodeRetired, Message: "ovnfs is exiting after an idle period"}})
 		return
 	}
 	if send(map[string]any{"welcome": w}) != nil {
@@ -385,7 +459,12 @@ func Dial(path, client string) (*Client, error) {
 	}
 	obj, err := readFrame(conn)
 	var w Welcome
-	if err == nil {
+	if raw, ok := obj["error"]; err == nil && ok && len(obj) == 1 {
+		remote := &RemoteError{}
+		if err = json.Unmarshal(raw, remote); err == nil {
+			err = remote
+		}
+	} else if err == nil {
 		raw, ok := obj["welcome"]
 		if !ok || len(obj) != 1 {
 			err = errors.New("expected welcome")

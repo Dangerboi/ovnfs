@@ -43,6 +43,11 @@ const (
 // back to its upper, bounding what a snapshot must flush and a crash loses.
 const memoryIdle = 2 * time.Second
 
+// defaultIdleExit is how long a daemon with no checkouts and no admin
+// connection waits before it unmounts and exits; the next client starts
+// another. Daemons started for a test or under a scratch HOME end this way.
+const defaultIdleExit = 10 * time.Minute
+
 // byteSize is a flag holding a byte count: a number with an optional binary
 // K, M, G or T suffix ("512M", "1G", "0").
 type byteSize int64
@@ -105,6 +110,7 @@ func serveDefaults(conf manifest.Daemon) kong.Option {
 		"nfs_nointr_default":  cmp.Or(os.Getenv("OVNFS_NFS_NOINTR"), conf.NFSNoIntr, "false"),
 		"nfs_xattrs_default":  cmp.Or(os.Getenv("OVNFS_NFS_XATTRS"), conf.NFSXattrs, "false"),
 		"git_remotes_default": cmp.Or(os.Getenv("OVNFS_GIT_REMOTES"), conf.GitRemotes, "true"),
+		"idle_exit_default":   cmp.Or(os.Getenv("OVNFS_IDLE_EXIT"), defaultIdleExit.String()),
 	}
 }
 
@@ -120,6 +126,8 @@ type serveCmd struct {
 	NFSNoIntr  bool     `name:"nfs-nointr" help:"Do not interrupt macOS NFS requests on signals. A stalled server can block indefinitely." default:"${nfs_nointr_default}"`
 	GitRemotes bool     `help:"Give each source repository a git remote ovnfs/NAME per checkout of it." default:"${git_remotes_default}" negatable:""`
 	NFSXattrs  bool     `name:"nfs-xattrs" help:"Keep the ._ files macOS NFS clients store extended attributes in; by default the daemon stores none and attributes last only in the client's cache." default:"${nfs_xattrs_default}" negatable:""`
+
+	IdleExit time.Duration `name:"idle-exit" help:"Unmount and exit after this long with no checkouts and no admin connection; the next client starts another daemon. 0 never exits." default:"${idle_exit_default}"`
 }
 
 // eventHub fans persisted events out to connected admin subscribers.
@@ -340,6 +348,12 @@ func (cmd *serveCmd) Run(c *cli) (err error) {
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigs)
+	var idle <-chan time.Time
+	if cmd.IdleExit > 0 {
+		ticker := time.NewTicker(max(min(cmd.IdleExit/4, time.Minute), 10*time.Millisecond))
+		defer ticker.Stop()
+		idle = ticker.C
+	}
 	force := false
 	for {
 		var req stopRequest
@@ -349,6 +363,27 @@ func (cmd *serveCmd) Run(c *cli) (err error) {
 			return err
 		case req = <-stops:
 		case <-sigs:
+		case <-idle:
+			// Holding hellos keeps a client from opening a checkout while
+			// the mount goes; a busy mount keeps the daemon serving.
+			if len(reg.Names()) > 0 || !adminServer.Hold(cmd.IdleExit) {
+				continue
+			}
+			flushRelease, idleErr := reg.Quiesce(context.Background())
+			if idleErr == nil {
+				if idleErr = release(false); idleErr != nil && flushRelease != nil {
+					flushRelease()
+				}
+			}
+			if idleErr != nil {
+				log.Printf("idle exit: %v; serving on", idleErr)
+				adminServer.Release(false)
+				continue
+			}
+			adminServer.Release(true)
+			releaseCaches = flushRelease
+			log.Printf("unmounted %s after %s with no checkouts and no clients", mount, cmd.IdleExit)
+			return nil
 		}
 		var flushRelease func()
 		if !force || req.keepMount {

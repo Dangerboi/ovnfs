@@ -14,6 +14,7 @@ func TestServeOptions(t *testing.T) {
 	for _, name := range []string{"OVNFS_MEMORY", "OVNFS_BLOB_CACHE", "OVNFS_ATIME", "OVNFS_FSYNC", "OVNFS_NFS_IO_SIZE", "OVNFS_NFS_NOINTR", "OVNFS_NFS_XATTRS"} {
 		t.Setenv(name, "")
 	}
+	t.Setenv("OVNFS_IDLE_EXIT", "")
 	parse := func(args ...string) (serveCmd, error) {
 		var commands verbs
 		args = append([]string{"serve"}, args...)
@@ -29,6 +30,14 @@ func TestServeOptions(t *testing.T) {
 	if err != nil || cmd.Proto != defaultProto() || cmd.Memory != 64<<20 || cmd.BlobCache != 16<<20 || cmd.Atime || cmd.Fsync || cmd.NFSNoIntr || cmd.NFSXattrs {
 		t.Fatalf("defaults: %+v, %v", cmd, err)
 	}
+	if cmd.IdleExit != defaultIdleExit {
+		t.Fatalf("idle exit default %v", cmd.IdleExit)
+	}
+	t.Setenv("OVNFS_IDLE_EXIT", "0")
+	if cmd, err = parse(); err != nil || cmd.IdleExit != 0 {
+		t.Fatalf("OVNFS_IDLE_EXIT=0: %v, %v", cmd.IdleExit, err)
+	}
+	t.Setenv("OVNFS_IDLE_EXIT", "")
 	if err := os.MkdirAll(filepath.Join(home, ".o2"), 0o755); err != nil {
 		t.Fatal(err)
 	}

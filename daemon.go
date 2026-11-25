@@ -54,11 +54,47 @@ func accepting(state string) bool {
 	return true
 }
 
-// client returns the daemon connection, auto-starting the daemon when the verb allows it.
+// client returns the daemon connection, auto-starting the daemon when the verb
+// allows it. A daemon exiting after an idle period answers hellos with
+// admin.CodeRetired until its socket closes, up to daemonWait: the client
+// waits that out, then starts or finds the next daemon. An auto-starting
+// client tries once more when the socket closes between its check and its
+// dial.
 func (c *cli) client() (*admin.Client, error) {
 	if c.conn != nil {
 		return c.conn, nil
 	}
+	deadline := time.Now().Add(daemonWait)
+	again := false
+	for {
+		client, err := c.connect()
+		switch {
+		case retired(err):
+			again = c.autostart
+		case err != nil && again:
+			again = false
+		default:
+			return client, err
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+		select {
+		case <-c.ctx.Done():
+			return nil, c.ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// retired reports a hello refused by a daemon exiting after an idle period.
+func retired(err error) bool {
+	remote, ok := errors.AsType[*admin.RemoteError](err)
+	return ok && remote.Code == admin.CodeRetired
+}
+
+// connect is one attempt of client.
+func (c *cli) connect() (*admin.Client, error) {
 	if c.autostart && !accepting(c.state) {
 		client, pid, err := startDaemon(c.ctx, c.state, c.mount)
 		if err != nil {
@@ -195,7 +231,7 @@ func awaitDaemon(ctx context.Context, state string, pid int, exited <-chan error
 				// Past the dial, the daemon accepted and then dropped the
 				// hello: it failed while loading, and its log says why.
 				var opErr *net.OpError
-				if !errors.As(r.err, &opErr) || opErr.Op != "dial" {
+				if !retired(r.err) && (!errors.As(r.err, &opErr) || opErr.Op != "dial") {
 					err = fmt.Errorf("%w; %s", err, logTail(state))
 				}
 				return nil, err

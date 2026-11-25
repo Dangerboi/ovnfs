@@ -84,6 +84,69 @@ func TestClientQuotesLogOfAFailedLoad(t *testing.T) {
 	}
 }
 
+// TestClientWaitsOutARetiringDaemon refuses hellos as a daemon exiting after
+// an idle period does, then serves another daemon on the socket under the
+// start lock, as an auto-start racing this client would: the client reaches
+// the new daemon instead of failing.
+func TestClientWaitsOutARetiringDaemon(t *testing.T) {
+	state, err := os.MkdirTemp("", "ovnfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(state) })
+	l, err := admin.Listen(socketPath(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	old := admin.NewServer()
+	go old.Serve(l)
+	old.Ready(admin.Welcome{Version: 1}, nil, nil)
+	if !old.Hold(0) {
+		t.Fatal("no hold on an idle server")
+	}
+	old.Release(true)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	type dialed struct {
+		client *admin.Client
+		err    error
+	}
+	done := make(chan dialed, 1)
+	go func() {
+		client, err := (&cli{ctx: ctx, state: state, mount: filepath.Join(state, "mnt"), autostart: true}).client()
+		done <- dialed{client, err}
+	}()
+	select {
+	case r := <-done:
+		t.Fatalf("client returned while the daemon retires: %v", r.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	lock, err := lockDaemon(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	next, err := admin.Listen(socketPath(state))
+	if err != nil {
+		lock.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { next.Close() })
+	s := admin.NewServer()
+	go s.Serve(next)
+	s.Ready(admin.Welcome{Version: 2}, nil, nil)
+	lock.Close()
+	r := <-done
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	defer r.client.Close()
+	if r.client.Welcome().Version != 2 {
+		t.Fatalf("welcome %+v, want the next daemon's", r.client.Welcome())
+	}
+}
+
 // TestStopWaitsForTheStartLock holds the start lock as a restart does between
 // its old and new daemon: stop waits for it instead of reporting no daemon
 // while the new one starts.

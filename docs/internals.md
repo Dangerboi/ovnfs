@@ -13,6 +13,8 @@ On it, frames are JSON objects behind a little-endian u32 length:
 2. the daemon replies `{"welcome": {"version": 5, "ops": […], "features": […], …}}`,
    where `features` names optional request fields it honors (`api.Features`:
    `new.base`, `diff.binary`, `ls.select`, `stop.keep_mount`);
+   a daemon exiting after an idle period replies
+   `{"error": {"code": "retired", …}}` instead, and its socket closes shortly;
 3. each request is `{"id": N, "<op>": {args}}`, answered by
    `{"id": N, "ok": reply}` or `{"id": N, "error": {"code", "message"}}`.
 
@@ -226,7 +228,11 @@ admin socket before its final flush, hash drain and state write, which can take
 a while under load; `stop` and `restart` wait for its process to exit, when the
 state lock is released, and `restart` holds the start lock throughout, so
 auto-starting clients wait for the new daemon rather than failing on the state
-lock. A starting daemon opens its admin socket before it loads its state, which
+lock. A daemon with no checkouts and no admin connection for `--idle-exit`
+holds new hellos, unmounts as `stop` does and exits, answering held and later
+hellos `retired`; a busy mount keeps it serving. A client that meets a
+retiring daemon waits for its socket to close and auto-starts the next one.
+A starting daemon opens its admin socket before it loads its state, which
 takes minutes on a large state, and holds each hello until it has mounted: a
 client that arrives during the load waits for it, up to five minutes, rather
 than starting a second daemon. Bases load several at a time, since each

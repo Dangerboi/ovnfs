@@ -167,6 +167,90 @@ func TestServerHoldsHelloUntilReady(t *testing.T) {
 	}
 }
 
+// TestHoldRetiresAnIdleServer holds hellos only once no connection has been
+// open for the idle period; a released hold welcomes the held client, and a
+// retiring one answers it with CodeRetired.
+func TestHoldRetiresAnIdleServer(t *testing.T) {
+	dir, err := os.MkdirTemp("", "ovn-admin-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "sock")
+	l, err := Listen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	s := NewServer()
+	go s.Serve(l)
+	s.Ready(Welcome{Version: 1}, nil, nil)
+	dial := func() <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			c, err := Dial(path, "test")
+			if err == nil {
+				c.Close()
+			}
+			done <- err
+		}()
+		return done
+	}
+	await := func(done <-chan error) error {
+		t.Helper()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(3 * time.Second):
+			t.Fatal("hello not answered")
+			return nil
+		}
+	}
+
+	if s.Hold(time.Hour) {
+		t.Fatal("held a server that just became ready")
+	}
+	c, err := Dial(path, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Hold(0) {
+		c.Close()
+		t.Fatal("held a server with an open connection")
+	}
+	c.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	for !s.Hold(0) {
+		if time.Now().After(deadline) {
+			t.Fatal("no hold after the last connection closed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	done := dial()
+	select {
+	case err := <-done:
+		t.Fatalf("hello answered during a hold: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	s.Release(false)
+	if err := await(done); err != nil {
+		t.Fatalf("held hello after the hold ended: %v", err)
+	}
+
+	for !s.Hold(0) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	done = dial()
+	time.Sleep(100 * time.Millisecond)
+	s.Release(true)
+	for _, done := range []<-chan error{done, dial()} {
+		err := await(done)
+		if remote, ok := errors.AsType[*RemoteError](err); !ok || remote.Code != CodeRetired {
+			t.Fatalf("hello to a retiring server: %v", err)
+		}
+	}
+}
+
 // TestConcurrentOutOfOrder verifies a slow call cannot block a later fast reply.
 func TestConcurrentOutOfOrder(t *testing.T) {
 	started := make(chan struct{})
