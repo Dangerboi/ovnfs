@@ -18,9 +18,10 @@ import (
 
 // serveNFS serves NFSv3 and NFSv4 on the persistent export. NFSv4 clients
 // get read delegations, recalled whenever the export reports a change made
-// behind their back. Without sync, stable writes and COMMIT sync nothing.
-func serveNFS(l net.Listener, e *export.Export, rec *stats.Recorder, sync bool) error {
-	srv := &nfs.Server{FS: e.NFS(), Concurrency: 64, NoSync: !sync, Stats: rec}
+// behind their back. Without settings.Sync, stable writes and COMMIT sync
+// nothing; with settings.DropAppleDouble, macOS ._ files are not kept.
+func serveNFS(l net.Listener, e *export.Export, rec *stats.Recorder, settings mountSettings) error {
+	srv := &nfs.Server{FS: e.NFS(), Concurrency: 64, NoSync: !settings.Sync, DropAppleDouble: settings.DropAppleDouble, Stats: rec}
 	if os.Getenv("LOG_LEVEL") != "" {
 		srv.Logf = log.Printf
 	}

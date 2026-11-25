@@ -52,6 +52,21 @@ checkout that made a warm `git status` 27 s; with `kern.maxvnodes=2097152` it
 took 2 s. `ovnfs status` warns when the cap is below twice the largest
 checkout's file count and prints the `sysctl` that fixes it.
 
+NFSv3 has no extended attributes, so the macOS client keeps a file's in an
+AppleDouble `._name` file beside it, and the kernel tags every file and
+directory a process creates with `com.apple.provenance`: each new entry costs
+a second file, with its own CREATE, WRITE, SETATTR and GETATTR calls. The
+export never lists `._` files, and unless [`nfs_xattrs: true`](configuration.md#where-the-daemon-lives)
+keeps them, the server answers the calls on them without storing anything: a
+lookup finds none, a create hands out a handle that keeps only the size
+written, and removing or renaming one changes nothing. Attributes set in a
+checkout last only while the client caches them. Four concurrent `bun
+install`s of a 13,000-file lockfile took 18 s instead of 27 s and a third less
+daemon CPU than with the files kept; a single install, bound by the client's
+round trips, was no faster, since the client makes the same calls. Refusing
+those creates would save the client's calls too, but fails `setxattr`, which
+`ditto` and `xattr -w` report.
+
 The 128 KiB I/O buffers balance bulk transfers with small random writes:
 macOS maps a whole buffer for a write and flushes it before a discontiguous
 write. Larger buffers make 4 KiB writes disproportionately expensive.

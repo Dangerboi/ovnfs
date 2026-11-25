@@ -6,12 +6,15 @@ const defaultNFSIOSize = 128 << 10
 
 // mountSettings controls native client mounts and what the NFS server promises
 // them. A zero NFSIOSize uses the default. Without Sync, NFS stable writes and
-// COMMIT sync nothing (serve --fsync).
+// COMMIT sync nothing (serve --fsync). With DropAppleDouble, the NFS server
+// keeps none of the ._ files macOS stores extended attributes in (serve's
+// default; --nfs-xattrs keeps them).
 type mountSettings struct {
-	Atime     bool
-	Sync      bool
-	NFSIOSize int
-	NFSNoIntr bool
+	Atime           bool
+	Sync            bool
+	NFSIOSize       int
+	NFSNoIntr       bool
+	DropAppleDouble bool
 }
 
 func (s mountSettings) nfsIOSize() int {

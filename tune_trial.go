@@ -112,7 +112,8 @@ func tuneTrial(ctx context.Context, root, source, home, exe string, base serveCm
 	args := []string{"serve", "--state", state, "--mount", mount, "--proto", config.Proto,
 		"--memory", config.Memory.String(), "--nfs-io-size", config.NFSIOSize.String(),
 		"--blob-cache", base.BlobCache.String(),
-		"--fsync=" + strconv.FormatBool(base.Fsync), "--atime=" + strconv.FormatBool(base.Atime), "--no-git-remotes"}
+		"--fsync=" + strconv.FormatBool(base.Fsync), "--atime=" + strconv.FormatBool(base.Atime),
+		"--nfs-xattrs=" + strconv.FormatBool(base.NFSXattrs), "--no-git-remotes"}
 	srv := exec.CommandContext(wait, exe, args...)
 	srv.Env = append(os.Environ(), "HOME="+privateHome, "USERPROFILE="+privateHome)
 	srv.Stdout, srv.Stderr = log, log

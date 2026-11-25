@@ -65,6 +65,13 @@ clients, leave the mount, then `ovnfs stop` and `ovnfs start`. Changing the
 policy with `restart` can force a remount. See [what happens during a
 stall](platforms.md#when-the-nfs-daemon-stops-answering).
 
+On macOS, the NFS client keeps extended attributes in a `._` file beside every
+file and directory created in a checkout, and the daemon stores none of them:
+attributes set in a checkout (`xattr -w`, Finder tags, quarantine) last only
+while the client caches them, and creating files costs the daemon less.
+`serve --nfs-xattrs` (`OVNFS_NFS_XATTRS=1`, user key `nfs_xattrs: true`)
+keeps them; see [AppleDouble files](platforms.md#nfs).
+
 `ovnfs tune` measures isolated mount configurations and asks before applying a
 balanced result. Add `--project DIR` for a real Cargo workspace; see
 [the tuning methodology](development.md#balanced-configuration-tuning).
@@ -257,6 +264,7 @@ env:
 | `atime` | boolean | user file only: allow access time updates |
 | `nfs_io_size` | size | user file only: NFS transfer size, power of two from 4K to 1M (default 128K; 0 uses default) |
 | `nfs_nointr` | boolean | user file only: disable signal interruption on macOS NFS (default false) |
+| `nfs_xattrs` | boolean | user file only: keep the `._` files macOS NFS clients store extended attributes in (default false) |
 | `git_remotes` | boolean | user file only: give a repository a git remote `ovnfs/NAME` per checkout (default true) |
 
 `rules` is a block scalar (`rules: |`) with one `<class> <predicate>` per line.
@@ -289,7 +297,8 @@ git_remotes: true
 For each setting, the explicit `serve` flag wins over its environment variable,
 which wins over the user file, which wins over the built-in default. The
 environment variables are `OVNFS_MEMORY`, `OVNFS_FSYNC`, `OVNFS_BLOB_CACHE`,
-`OVNFS_ATIME`, `OVNFS_NFS_IO_SIZE`, `OVNFS_NFS_NOINTR` and `OVNFS_GIT_REMOTES`;
+`OVNFS_ATIME`, `OVNFS_NFS_IO_SIZE`, `OVNFS_NFS_NOINTR`, `OVNFS_NFS_XATTRS` and
+`OVNFS_GIT_REMOTES`;
 `proto` has no environment variable.
 Serve settings take effect the next time the daemon starts.
 
@@ -311,7 +320,8 @@ ovnfs config edit --global
 
 The keys are `rules`, `cache.ROOT.rebuild`, `cache.ROOT.key`, `env.image`,
 `env.setup` and the daemon settings `state`, `mount`, `proto`, `memory`,
-`fsync`, `blob_cache`, `atime`, `nfs_io_size`, `nfs_nointr` and `git_remotes`.
+`fsync`, `blob_cache`, `atime`, `nfs_io_size`, `nfs_nointr`, `nfs_xattrs` and
+`git_remotes`.
 A cache root may hold dots (`cache.web/.next.key`) and matches its entry
 however it is spelled (`cache.web/dist.rebuild` finds `./web/dist`).
 `rules`, `env.setup` and

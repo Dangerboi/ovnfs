@@ -51,7 +51,12 @@ type Server struct {
 	// reports every write as committed so that clients send no COMMIT. A
 	// crash of the host or the server can then lose acknowledged data.
 	NoSync bool
-	Logf   func(format string, args ...any)
+	// DropAppleDouble answers NFSv3 calls on the AppleDouble "._" files a
+	// macOS client keeps extended attributes in without storing them
+	// (appledouble.go): those attributes last only while the client caches
+	// them.
+	DropAppleDouble bool
+	Logf            func(format string, args ...any)
 	// Stats times the calls answered, by procedure (group "nfs"); nil times none.
 	Stats *stats.Recorder
 

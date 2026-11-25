@@ -103,6 +103,7 @@ func serveDefaults(conf manifest.Daemon) kong.Option {
 		"atime_default":       cmp.Or(os.Getenv("OVNFS_ATIME"), conf.Atime, "false"),
 		"nfs_io_size_default": cmp.Or(os.Getenv("OVNFS_NFS_IO_SIZE"), conf.NFSIOSize, byteSize(defaultNFSIOSize).String()),
 		"nfs_nointr_default":  cmp.Or(os.Getenv("OVNFS_NFS_NOINTR"), conf.NFSNoIntr, "false"),
+		"nfs_xattrs_default":  cmp.Or(os.Getenv("OVNFS_NFS_XATTRS"), conf.NFSXattrs, "false"),
 		"git_remotes_default": cmp.Or(os.Getenv("OVNFS_GIT_REMOTES"), conf.GitRemotes, "true"),
 	}
 }
@@ -118,6 +119,7 @@ type serveCmd struct {
 	NFSIOSize  byteSize `name:"nfs-io-size" help:"NFS read/write transfer size (power of two, 4K to 1M)." default:"${nfs_io_size_default}"`
 	NFSNoIntr  bool     `name:"nfs-nointr" help:"Do not interrupt macOS NFS requests on signals. A stalled server can block indefinitely." default:"${nfs_nointr_default}"`
 	GitRemotes bool     `help:"Give each source repository a git remote ovnfs/NAME per checkout of it." default:"${git_remotes_default}" negatable:""`
+	NFSXattrs  bool     `name:"nfs-xattrs" help:"Keep the ._ files macOS NFS clients store extended attributes in; by default the daemon stores none and attributes last only in the client's cache." default:"${nfs_xattrs_default}" negatable:""`
 }
 
 // eventHub fans persisted events out to connected admin subscribers.
@@ -177,6 +179,7 @@ func (cmd *serveCmd) Run(c *cli) (err error) {
 	if err := settings.validate(); err != nil {
 		return err
 	}
+	settings.DropAppleDouble = !cmd.NFSXattrs
 	go releaseIdle()
 	var mem *overlay.Memory
 	if cmd.Memory > 0 {
@@ -601,7 +604,7 @@ func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, st
 		smbStarted(s)
 		go func() { served <- fmt.Errorf("smb serve: %w", s.Serve(files)) }()
 	} else {
-		go func() { served <- fmt.Errorf("nfs serve: %w", serveNFS(files, e, reg.Stats(), settings.Sync)) }()
+		go func() { served <- fmt.Errorf("nfs serve: %w", serveNFS(files, e, reg.Stats(), settings)) }()
 	}
 	if err = attach(proto, listener.Addr(), mount, user, password, settings); err != nil {
 		files.cut()
@@ -624,7 +627,7 @@ func mountLocal(reg *checkout.Registry, e *export.Export, state, mount string, s
 		return nil, fmt.Errorf("persist listen: %w", err)
 	}
 	stopped := make(chan error, 1)
-	go func() { stopped <- serveNFS(files, e, reg.Stats(), settings.Sync) }()
+	go func() { stopped <- serveNFS(files, e, reg.Stats(), settings) }()
 	if err = attach("nfs", l.Addr(), mount, "", "", settings); err != nil {
 		files.cut()
 		<-stopped

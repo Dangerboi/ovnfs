@@ -278,7 +278,9 @@ number) comes from what backs the file, never from its path:
   taken, so a removed checkout's slot is reused only after all 4095 others
   were. Slot 0 is the export's virtual root: the root is id 1 and
   `.metadata_never_index` id 2. Every id stays below 2^53, so JavaScript
-  runtimes see exact inode numbers.
+  runtimes see exact inode numbers. The handles the NFS server hands out for
+  the `._` files it does not store (unless `nfs_xattrs: true`) carry 2^62
+  plus a sequence number, which no backend id reaches.
 
 Handing out an id lists no directory and records nothing: it is read off the
 file information the request already has. An id resolves back to a path
