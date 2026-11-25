@@ -474,9 +474,10 @@ func statHost(name string, s *idStore) (os.FileInfo, error) {
 
 // inherit returns the identity an upper copy made at p takes from source s;
 // 0 leaves the copy its own identity. A frozen file with other hard links
-// keeps its identity under them. Cargo, for example, can link a bottom
-// artifact into deps/ and beside it; the first copy takes the shared ID,
-// and a later copy gets its own, even if the first was frozen in between.
+// keeps its identity under them. A bottom whose names of one file share an
+// identity (base gives each name of a folder file its own, except on
+// Windows) parts them here: the first copy takes the shared ID, and a later
+// copy gets its own, even if the first was frozen in between.
 // The caller holds f.mu with the index loaded.
 func (f *FS) inherit(s source, p string, info os.FileInfo) ident.ID {
 	id, _ := ident.Of(info)

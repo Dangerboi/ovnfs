@@ -1238,7 +1238,7 @@ retry:
 		goto retry
 	}
 	markDead := func() {
-		if id, ok := ident.Of(info); ok && id.Space() == ident.State && !info.IsDir() && alias == "" {
+		if id, ok := ident.Of(info); ok && id.Hosted() && !info.IsDir() && alias == "" {
 			f.markRemoved(id)
 		}
 	}
@@ -1494,7 +1494,7 @@ retry:
 	if inPlace && f.hostFile(src) && (derr != nil || f.hostFile(dst) && dstAlias == "") && f.queueable() {
 		err := f.queueRename(src, dst, dinfo)
 		if err == nil && derr == nil && !dinfo.IsDir() {
-			if id, ok := ident.Of(dinfo); ok && id.Space() == ident.State {
+			if id, ok := ident.Of(dinfo); ok && id.Hosted() {
 				f.markRemoved(id)
 			}
 		}
@@ -1511,7 +1511,7 @@ retry:
 	if inPlace && f.hostFile(src) && f.lazyDirs() && (derr != nil || f.hostFile(dst) && dstAlias == "") {
 		err := f.renameOutside(src, dst, dinfo)
 		if err == nil && derr == nil && !dinfo.IsDir() {
-			if id, ok := ident.Of(dinfo); ok && id.Space() == ident.State {
+			if id, ok := ident.Of(dinfo); ok && id.Hosted() {
 				f.markRemoved(id)
 			}
 		}
@@ -1561,7 +1561,7 @@ retry:
 		}
 	}
 	if derr == nil && !dinfo.IsDir() && dstAlias == "" {
-		if id, ok := ident.Of(dinfo); ok && id.Space() == ident.State {
+		if id, ok := ident.Of(dinfo); ok && id.Hosted() {
 			f.markRemoved(id)
 		}
 	}

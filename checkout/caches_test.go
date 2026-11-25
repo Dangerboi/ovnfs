@@ -130,70 +130,78 @@ func TestCheckoutOwnsWhatItChangedBelowACacheRoot(t *testing.T) {
 	}
 }
 
-// TestHardLinksBelowACacheRootPartOnWrite checks two names of one folder
-// file below a cache root, as cargo links an artifact into deps/ and beside
-// it. A checkout shows them as the one file they are, with one identity. The
-// first name it writes to takes that identity into its copy, so a handle on
-// the file follows it; the second is by then another file, and its copy gets
-// an identity of its own instead of a second claim to the first's.
-func TestHardLinksBelowACacheRootPartOnWrite(t *testing.T) {
+// TestHardLinksPartOnWrite checks two names of one folder file below a cache
+// or local root, as cargo links an artifact into deps/ and beside it. Each
+// name has its own identity, so a write through one name's handle copies up
+// that name, keeps its identity, and leaves the other the folder's.
+func TestHardLinksPartOnWrite(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows file information has no link count or identity to share")
+		t.Skip("Windows file information has no link count")
 	}
-	f := newFixture(t)
-	dir := folder(t, map[string]string{"src/main": "one", "target/deps/app-1a2b": "built\n"})
-	if err := os.Link(filepath.Join(dir, "target/deps/app-1a2b"), filepath.Join(dir, "target/app")); err != nil {
-		t.Fatal(err)
-	}
-	f.newCheckout(dir, "a", "cache dir & target")
-	var s Session
-	if err := f.reg.Enter("a", &s); err != nil {
-		t.Fatal(err)
-	}
-	defer s.Done()
-	identity := func(p string) ident.ID {
-		t.Helper()
-		info, err := s.FS.Lstat(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		id, ok := ident.Of(info)
-		if !ok {
-			t.Fatalf("%s has no identity", p)
-		}
-		return id
-	}
-	extend := func(p, data string) {
-		t.Helper()
-		file, err := s.FS.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0)
-		if err == nil {
-			_, err = file.Write([]byte(data))
-			err = errors.Join(err, file.Close())
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	shared := identity("target/app")
-	if got := identity("target/deps/app-1a2b"); got != shared {
-		t.Fatalf("two names of one folder file have identities %v and %v", shared, got)
-	}
+	for _, class := range []string{"cache", "local"} {
+		t.Run(class, func(t *testing.T) {
+			f := newFixture(t)
+			dir := folder(t, map[string]string{"src/main": "one", "target/deps/app-1a2b": "built\n"})
+			if err := os.Link(filepath.Join(dir, "target/deps/app-1a2b"), filepath.Join(dir, "target/app")); err != nil {
+				t.Fatal(err)
+			}
+			f.newCheckout(dir, "a", class+" dir & target")
+			var s Session
+			if err := f.reg.Enter("a", &s); err != nil {
+				t.Fatal(err)
+			}
+			defer s.Done()
+			identity := func(p string) ident.ID {
+				t.Helper()
+				info, err := s.FS.Lstat(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				id, ok := ident.Of(info)
+				if !ok {
+					t.Fatalf("%s has no identity", p)
+				}
+				return id
+			}
+			// A client writes through the identity it looked up, as an NFS
+			// handle does, not through a path.
+			extend := func(id ident.ID, data string) {
+				t.Helper()
+				p, ok := s.FS.Locate(id)
+				if !ok {
+					t.Fatalf("identity %v resolves to nothing", id)
+				}
+				file, err := s.FS.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0)
+				if err == nil {
+					_, err = file.Write([]byte(data))
+					err = errors.Join(err, file.Close())
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			app, deps := identity("target/app"), identity("target/deps/app-1a2b")
+			if app == deps {
+				t.Fatalf("two names of one folder file share identity %v", app)
+			}
 
-	extend("target/app", "stripped\n")
-	if got := identity("target/app"); got != shared {
-		t.Errorf("the first name written has identity %v, want the %v a handle on it holds", got, shared)
-	}
-	if p, ok := s.FS.Locate(shared); !ok || p != "target/app" {
-		t.Errorf("the shared identity resolves to %q, %v; want the copy that took it", p, ok)
-	}
-	extend("target/deps/app-1a2b", "signed\n")
-	if got := identity("target/deps/app-1a2b"); got == shared {
-		t.Errorf("the second name written claims identity %v, which the first holds", got)
-	}
-	for p, want := range map[string]string{"target/app": "built\nstripped\n", "target/deps/app-1a2b": "built\nsigned\n"} {
-		if got := f.read("a", p); got != want {
-			t.Errorf("%s = %q, want %q", p, got, want)
-		}
+			extend(deps, "signed\n")
+			if got := identity("target/deps/app-1a2b"); got != deps {
+				t.Errorf("the name written has identity %v, want the %v its handle holds", got, deps)
+			}
+			if p, ok := s.FS.Locate(app); !ok || p != "target/app" {
+				t.Errorf("the unwritten name's identity resolves to %q, %v", p, ok)
+			}
+			extend(app, "stripped\n")
+			for p, want := range map[string]string{"target/app": "built\nstripped\n", "target/deps/app-1a2b": "built\nsigned\n"} {
+				if got := f.read("a", p); got != want {
+					t.Errorf("%s = %q, want %q", p, got, want)
+				}
+			}
+			if data, err := os.ReadFile(filepath.Join(dir, "target/app")); err != nil || string(data) != "built\n" {
+				t.Errorf("the folder's file = %q, %v; want it untouched", data, err)
+			}
+		})
 	}
 }
 

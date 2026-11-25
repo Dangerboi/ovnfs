@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -14,42 +13,27 @@ import (
 
 // locator finds the view path of a State identity, an inode of the state
 // volume, with fsgetpath(2): a few microseconds, without walking anything.
-// That call names one path of a file with several names, and not always one
-// the overlay still shows, so the names of such files that were looked up are
-// remembered too (see [memo]) and tried first.
+// A file with several names, whose path that call could not choose, never
+// hands out its inode's identity (see [Caches.lookupInfo]).
 type locator struct {
 	once sync.Once
 	fsid unix.Fsid
 	// The snapshot's tree and the folder as the kernel names them, symlinks
 	// resolved; "" when unknown.
 	tree, folder string
-	memo         memo
 }
 
-// seen remembers that the file info describes, if it has several names, was
-// looked up at view path p.
-func (l *locator) seen(info os.FileInfo, p string) {
-	if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 && !info.IsDir() {
-		l.memo.put(st.Ino, p)
-	}
-}
+// seen remembers nothing: fsgetpath(2) needs no earlier lookup.
+func (*locator) seen(os.FileInfo, string) {}
 
-// listed remembers hard links too: a listing can issue a file handle even
-// when no client looks the name up separately.
-func (l *locator) listed(info os.FileInfo, dir string) {
-	if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 && !info.IsDir() {
-		l.memo.put(st.Ino, dir+"/"+info.Name())
-	}
-}
+// listed remembers nothing either.
+func (*locator) listed(os.FileInfo, string) {}
 
 // locate returns a view path of the entry with inode ino that the view
 // shows, as shown reports: a file of a local root, in the snapshot's tree, or
 // the folder's own file below a cache root.
 func (c *Caches) locate(b *Base, ino uint64, shown func(p string) bool) (string, bool) {
 	l := &c.locator
-	if p, ok := l.memo.find(ino, shown); ok {
-		return p, true
-	}
 	l.once.Do(func() {
 		// The base's state exists before any snapshot's tree does.
 		var st unix.Statfs_t

@@ -438,8 +438,9 @@ func TestBaseIdentities(t *testing.T) {
 	}
 }
 
-// A handle issued by READDIR remains resolvable after an overlay rename
-// and unlink, without a client first looking up the surviving hard link.
+// A handle READDIR issues for each name of a hard-linked cache file resolves
+// after an overlay rename, without a client first looking the name up, and
+// stays that name's: removing one name leaves the other's handle resolving.
 func TestLocateListedCacheHardlinkAfterWhiteout(t *testing.T) {
 	repo, dir := repository(t)
 	a := filepath.Join(dir, "target", "deps", "a")
@@ -462,32 +463,30 @@ func TestLocateListedCacheHardlinkAfterWhiteout(t *testing.T) {
 	if err != nil || len(items) != 2 {
 		t.Fatalf("ReadDir = %v, %v", items, err)
 	}
-	id, ok := ident.Of(items[0])
-	other, ok2 := ident.Of(items[1])
-	if !ok || !ok2 || id != other {
-		t.Fatalf("listed aliases lack a shared handle: %v and %v", id, other)
+	ids := map[string]ident.ID{}
+	for _, item := range items {
+		id, ok := ident.Of(item)
+		if !ok {
+			t.Fatalf("listed %s has no identity", item.Name())
+		}
+		ids["moved/deps/"+item.Name()] = id
 	}
-	first, ok := view.Locate(id)
-	if !ok {
-		t.Fatal("listed handle did not resolve")
+	if ids["moved/deps/a"] == ids["moved/deps/b"] {
+		t.Fatalf("two names share handle %v", ids["moved/deps/a"])
 	}
-	gone, want := "moved/deps/a", "moved/deps/b"
-	if first == "target/deps/b" {
-		gone, want = want, gone
-	} else if first != "target/deps/a" {
-		t.Fatalf("unexpected bottom path %q", first)
+	for p, id := range ids {
+		if got, ok := f.Locate(id); !ok || got != p {
+			t.Fatalf("listed handle of %s resolves to %q, %v", p, got, ok)
+		}
 	}
-	if err := f.Remove(gone); err != nil {
+	if err := f.Remove("moved/deps/a"); err != nil {
 		t.Fatal(err)
 	}
-	if p, ok := f.Locate(id); !ok || p != want {
-		t.Fatalf("Locate after removing %s = %q, %v; want %s", gone, p, ok, want)
+	if p, ok := f.Locate(ids["moved/deps/a"]); ok {
+		t.Fatalf("a removed name's handle resolves to %s", p)
 	}
-	if err := f.Remove(want); err != nil {
-		t.Fatal(err)
-	}
-	if p, ok := f.Locate(id); ok {
-		t.Fatalf("both aliases removed but ID still resolves to %s", p)
+	if p, ok := f.Locate(ids["moved/deps/b"]); !ok || p != "moved/deps/b" {
+		t.Fatalf("the other name's handle resolves to %q, %v", p, ok)
 	}
 }
 

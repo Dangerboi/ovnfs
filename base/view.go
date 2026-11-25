@@ -75,12 +75,18 @@ func (v bottom) Locate(id ident.ID) (string, bool) {
 		got, known := ident.Of(info)
 		return known && got == id
 	}
-	switch id.Space() {
-	case ident.Capture:
+	switch {
+	case id.IsNamed():
+		if v.c != nil {
+			if p, ok := v.c.named(id); ok && shown(p) {
+				return p, true
+			}
+		}
+	case id.Space() == ident.Capture:
 		if p, ok := v.b.nodePath(id.Value()); ok && shown(p) {
 			return p, true
 		}
-	case ident.State:
+	case id.Space() == ident.State:
 		if v.c != nil {
 			return v.c.locate(v.b, id.Value(), shown)
 		}
@@ -104,7 +110,7 @@ func (v bottom) LocateAlias(id ident.ID, visible func(string) bool) bool {
 // rejects names shadowed or removed in the overlay). It returns false while
 // the entry is still shown by the fence or was never handed out.
 func (v bottom) Vanished(id ident.ID, ok func(string) bool) (string, os.FileInfo, bool) {
-	if id.Space() != ident.State || v.c == nil {
+	if !id.Hosted() || v.c == nil {
 		return "", nil, false
 	}
 	return v.c.seen.get(id, func(p string) bool {

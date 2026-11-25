@@ -18,6 +18,9 @@
   standalone virtual `local` files (such as `.env`) still work across volumes.
   With opt-in `local: frozen`, local paths are byte-copied rather than
   reflinked across volumes.
+- Over NFS (macOS), a checkout process reading a file inside a `local`
+  directory gets `ESTALE` when the host replaces or deletes that file; edits
+  in place and standalone `local` files such as `.env` are not affected.
 - A tracked file the user changes after open is read from the repository's
   objects; pruning those objects can make it unreadable.
 - Files from git (`--rev`, `--take` from the index or a revision) go through

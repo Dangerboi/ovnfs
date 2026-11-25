@@ -44,8 +44,8 @@ import (
 // elsewhere cache roots start empty, as on another machine. The fence keeps a
 // reused inode number from naming two entries: a file made after it is not
 // shown. Two names of one file (cargo links an artifact into deps/ and
-// beside it) share its identity, as hard links do; the overlay decides what
-// a copy of one keeps (overlay.FS.inherit).
+// beside it) each take an identity of their own instead (see
+// [Caches.lookupInfo]).
 
 // fence is where a checkout's view of the folder's cache roots ends.
 type fence struct {
@@ -144,7 +144,7 @@ func (v bottom) fenced(p, root string, n uint32) (entry, error) {
 	if p == root {
 		e.info = hostInfo{FileInfo: info, id: captureID(n)}
 	} else {
-		e.info = v.c.locator.lookupInfo(info, host, p)
+		e.info = v.c.lookupInfo(info, host, p)
 		if !info.IsDir() {
 			e.info = v.c.rememberFenced(p, e.info)
 		}
@@ -181,7 +181,7 @@ func (v bottom) fencedDir(p string) ([]os.FileInfo, error) {
 			host = filepath.Join(dir, e.Name())
 		}
 		if info = hostfile.Linked(info, host); f.shows(host, info) {
-			li := v.c.locator.listedInfo(info, host, p)
+			li := v.c.listedInfo(info, host, p)
 			if !info.IsDir() {
 				li = v.c.rememberFenced(p+"/"+info.Name(), li)
 			}
@@ -212,7 +212,7 @@ func (v bottom) live(p, root string, n uint32) (entry, error) {
 	if p == root {
 		e.info = hostInfo{FileInfo: info, id: captureID(n)}
 	} else {
-		e.info = v.c.locator.lookupInfo(info, host, p)
+		e.info = v.c.lookupInfo(info, host, p)
 	}
 	return e, nil
 }
@@ -243,7 +243,7 @@ func (v bottom) liveDir(p string) ([]os.FileInfo, error) {
 			host = filepath.Join(dir, e.Name())
 		}
 		if info = hostfile.Linked(info, host); onVolume(info, vol) {
-			out = append(out, v.c.locator.listedInfo(info, host, p))
+			out = append(out, v.c.listedInfo(info, host, p))
 		}
 	}
 	return out, nil

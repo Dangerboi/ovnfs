@@ -425,17 +425,24 @@ reference's sequence bits. On other Windows filesystems it requires the full
 file index to fit. WinFsp uses the identity to resolve open directories.
 
 Two names of one folder file, as cargo links an artifact into `deps/` and
-beside it, share that identity, where a clone gave each name a file of its
-own. While both are the folder's they are one file to a client, as hard
-links are. The first name a checkout copies up takes the identity along, so
-a handle held on the file follows it through a rename or a write; a second
-name copied up is another file by then and gets an identity of its own
-(`overlay.FS.inherit`). In between, the name not yet copied still reads the
-folder's content by path, while a handle on it reads the copy: visible only
-to a tool that rewrites a linked artifact in place instead of replacing it.
-`fsgetpath` names one path of such a file, not always one the checkout still
-shows, so macOS also remembers where files with several names were looked up
-and tries that first.
+beside it, are two files in a checkout, below cache and local roots alike:
+a write through one name copies that name up and leaves the other the
+folder's. Since a client addresses a file by identity alone (an NFS handle),
+each name gets an identity of its own instead of the inode's: a `Named`
+one, a `Capture` value above every node number, from a hash of its view
+path. The snapshot remembers the names it handed out and resolves them by
+that table; a handle on one does not survive a daemon restart until the
+name is looked up again. Two paths whose hashes collide keep the shared
+inode identity, as Windows, which reports no link count, always does; there
+the first name a checkout copies up takes the identity along, and a second
+gets its own (`overlay.FS.inherit`).
+
+A handle on a file the host removes or replaces below a local directory is
+stale (`ESTALE`), even for a process still reading it. NFSv3 has no open, so
+the server cannot tell that reader's `GETATTR` from a new open's: answering
+it from the old file would keep showing that file to every new open until
+the client's attribute cache expires (up to 60 s on macOS), where `ESTALE`
+makes the client look the name up again within seconds.
 
 A snapshot taken by a build that cloned cache roots still holds those clones,
 unread, until it goes; its fence is when it was complete.

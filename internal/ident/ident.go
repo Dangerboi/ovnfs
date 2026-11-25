@@ -5,7 +5,8 @@
 // An identity comes from the backing store, never from the entry's path:
 //
 //   - [Capture]: an entry of the base's capture, numbered by its capture.idx
-//     node, whether its bytes come from the folder or from a blob.
+//     node, whether its bytes come from the folder or from a blob. Values
+//     above every node number are [Named] identities.
 //   - [State]: a file or directory on the state volume (upper, frozen layers,
 //     cache snapshots), numbered by its own inode.
 //   - [Synthetic]: an entry with no usable inode, such as a file held in
@@ -79,6 +80,27 @@ func (id ID) Value() uint64 { return uint64(id) & MaxValue }
 type Identifier interface {
 	Identity() ID
 }
+
+// namedFirst is the first [Capture] value of a [Named] identity: capture
+// node numbers are 32-bit.
+const namedFirst = 1 << 32
+
+// Named returns the identity of a folder file with several names below a
+// cache or local root, from hash, a hash of the name's view path. Each name
+// is its own entry in a checkout, since a copy-up parts it from the others,
+// so a client writing through one name's handle reaches that name. Two paths
+// whose hashes collide share an identity; callers detect that.
+func Named(hash uint64) ID {
+	return ID(uint64(Capture)<<ValueBits | (namedFirst + hash%(MaxValue+1-namedFirst)))
+}
+
+// IsNamed reports whether id is a [Named] identity.
+func (id ID) IsNamed() bool { return id.Space() == Capture && id.Value() >= namedFirst }
+
+// Hosted reports whether id identifies a host file served as it is: a
+// [State] inode or a [Named] folder file. Such a file can leave a cache
+// root's fenced view while clients still hold its identity.
+func (id ID) Hosted() bool { return id.Space() == State || id.IsNamed() }
 
 // Of returns the identity of the entry info describes: its [Identifier]
 // identity, else the [State] identity of the inode in its native stat. Only

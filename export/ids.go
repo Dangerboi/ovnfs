@@ -163,7 +163,7 @@ func (r *Router) find(fid uint64, cached bool) (p string, life uint32, ok bool) 
 // checkout opened and the checkout itself has not shadowed or removed it.
 func (r *Router) vanished(fid uint64) (p string, info os.FileInfo, life uint32, ok bool) {
 	slot, id := splitFileID(fid)
-	if slot == 0 || id.Space() != ident.State {
+	if slot == 0 || !id.Hosted() {
 		return "", nil, 0, false
 	}
 	var s checkout.Session
@@ -187,7 +187,7 @@ func (r *Router) vanished(fid uint64) (p string, info os.FileInfo, life uint32, 
 // fid's identity so a client's truncating write succeeds.
 func (r *Router) truncateVanished(fid uint64, wantLife uint32) (string, os.FileInfo, error) {
 	slot, id := splitFileID(fid)
-	if slot == 0 || id.Space() != ident.State {
+	if slot == 0 || !id.Hosted() {
 		return "", nil, syscall.ESTALE
 	}
 	var s checkout.Session

@@ -27,7 +27,8 @@ type Bottom interface {
 	CopyTo(p, dst string) error
 	// Locate returns the path of the bottom entry whose identity is id, or
 	// false; [FS.Locate] verifies that the overlay still shows it there. It
-	// must not need an earlier lookup of the entry.
+	// must not need an earlier lookup of the entry, except for identities
+	// derived from a path ([ident.Named]), which this process handed out.
 	Locate(id ident.ID) (string, bool)
 }
 

@@ -16,6 +16,7 @@ import (
 
 	"github.com/stencil-hq/ovnfs/internal/clone"
 	"github.com/stencil-hq/ovnfs/internal/hostfile"
+	"github.com/stencil-hq/ovnfs/internal/ident"
 	"github.com/stencil-hq/ovnfs/internal/search/fsys"
 	"github.com/stencil-hq/ovnfs/rules"
 )
@@ -84,6 +85,10 @@ type Caches struct {
 	proofs   map[string]bool
 	locator  locator    // resolves State identities to view paths (platform)
 	seen     fencedMemo // pre-fence metadata of cache-root files handed out
+	// names holds the view paths of the Named identities handed out (see
+	// [Caches.lookupInfo]).
+	namesMu sync.RWMutex
+	names   map[ident.ID]string
 }
 
 // cacheRoot is a local root the snapshot holds, as the folder had it when the
