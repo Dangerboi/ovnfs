@@ -17,6 +17,7 @@ import (
 	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/osfs"
 
+	"github.com/stencil-hq/ovnfs/internal/hostfile"
 	"github.com/stencil-hq/ovnfs/smb"
 )
 
@@ -27,7 +28,6 @@ import (
 type testFS struct {
 	billy.Filesystem
 	root  string
-	files billy.Basic // BoundOS returns syncable descriptors; ChrootOS wraps away Sync.
 	// cacheable is Backend.Cacheable; nil admits nothing.
 	cacheable func(p string) bool
 
@@ -47,7 +47,6 @@ func newTestFS(t testing.TB) *testFS {
 	}
 	return &testFS{
 		Filesystem: osfs.New(root),
-		files:      osfs.New(root, osfs.WithBoundOS()),
 		root:       root,
 		ids:        map[string]uint64{"": 1},
 		paths:      map[uint64]string{1: ""},
@@ -102,9 +101,26 @@ func (f *testFS) Path(id, gen uint64) (string, bool) {
 // Relocate is Path: the map is always current.
 func (f *testFS) Relocate(id, gen uint64) (string, bool) { return f.Path(id, gen) }
 
+// OpenFile opens through hostfile, as the export does, so a held descriptor
+// does not block renaming or removing its file on Windows.
 func (f *testFS) OpenFile(p string, flag int, perm os.FileMode) (billy.File, error) {
-	return f.files.OpenFile(p, flag, perm)
+	if flag&os.O_CREATE != 0 {
+		if err := os.MkdirAll(filepath.Dir(f.host(p)), 0o755); err != nil {
+			return nil, err
+		}
+	}
+	file, err := hostfile.OpenFile(f.host(p), flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	return hostFile{file}, nil
 }
+
+// hostFile is a syncable host descriptor as a billy.File.
+type hostFile struct{ *os.File }
+
+func (hostFile) Lock() error   { return billy.ErrNotSupported }
+func (hostFile) Unlock() error { return billy.ErrNotSupported }
 
 func (f *testFS) SyncFile(p string, id, gen uint64, writer billy.File) error {
 	current, ok := f.Path(id, gen)
@@ -138,7 +154,10 @@ func (f *testFS) RetireHandle(id uint64) bool {
 
 // Rename moves the ids of from and its descendants to to, retiring to's.
 func (f *testFS) Rename(from, to string) error {
-	if err := f.Filesystem.Rename(from, to); err != nil {
+	if err := os.MkdirAll(filepath.Dir(f.host(to)), 0o755); err != nil {
+		return err
+	}
+	if err := hostfile.Rename(f.host(from), f.host(to)); err != nil {
 		return err
 	}
 	from, to = clean(from), clean(to)
@@ -160,7 +179,7 @@ func (f *testFS) Rename(from, to string) error {
 
 // Remove retires p's id.
 func (f *testFS) Remove(p string) error {
-	if err := f.Filesystem.Remove(p); err != nil {
+	if err := hostfile.Remove(f.host(p)); err != nil {
 		return err
 	}
 	f.mu.Lock()
