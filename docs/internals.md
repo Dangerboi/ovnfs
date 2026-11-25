@@ -505,6 +505,36 @@ move (no repository, submodules) and one the repository's git state outgrew are
 released within a minute. Prepared checkouts are in no state: a restart
 removes them.
 
+## NFSv3 write-behind
+
+Without `--fsync`, an NFSv3 WRITE can copy its payload into a queue owned by
+the file, rather than perform the backing write on the RPC's reply path. A
+burst pins one writable descriptor. Each reply starts with the preceding
+reply's size and mtime (or the descriptor's attributes for a new burst), and
+reports the new size and timestamp. NFS uses size for space used and mtime for
+atime, ctime and NFSv4 change. Once the reply is sent, a worker applies the
+ranges in arrival order, joining adjacent writes in the same buffer, then
+sets the backing mtime to the one it reported. It never calls fsync. Set-ID
+files stay synchronous because a host write may clear their permission bits.
+Across all files, at most 8 MiB of payload storage is queued or in flight.
+When there is no room a writer drains its own backlog and writes through.
+
+An operation on a file excludes new deferrals and waits for earlier writes;
+operations that can reach other names, including renames, listings and NFSv4
+compounds, drain the whole queue. Other export frontends and the registry's
+quiesce gate do the same before accessing a checkout or taking freeze locks.
+While an exclusion is held, writes through NFS to the excluded files apply
+synchronously: snapshots, forks, diffs and a planned stop do not miss an
+acknowledged write.
+
+A write already acknowledged cannot return a later `ENOSPC` or I/O error to
+its original caller. The worker logs the failure, discards that file's
+remaining queued writes, and the next WRITE or COMMIT on that file returns the
+error once. A direct checkout barrier fails rather than publishing incomplete
+data while the error is outstanding. The file may contain a partial update:
+check or regenerate it after a late failure. A crash can lose queued writes
+even when their replies said `FILE_SYNC`; `--fsync` disables this queue.
+
 ## Native filesystem reads
 
 Capture, cache snapshot and checkout listings share `internal/search/fsys` with native

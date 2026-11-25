@@ -18,6 +18,7 @@
 package nfs
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"net"
@@ -108,6 +109,11 @@ func (s *Server) Serve(l net.Listener) error {
 func (s *Server) start() {
 	s.once.Do(func() {
 		_, _ = rand.Read(s.verf[:])
+		if fs, ok := s.FS.(interface {
+			SetWriteBarrier(func(context.Context) (func(), error))
+		}); s.NoSync && ok {
+			fs.SetWriteBarrier(s.Quiesce)
+		}
 		if s.v3.readers.cache.Max == 0 {
 			s.v3.readers.cache.Max = defaultKeptReaders
 		}
@@ -158,6 +164,16 @@ func (s *Server) RecallRange(first, last uint64) {
 func (s *Server) RetireRange(first, last uint64) {
 	s.RecallRange(first, last)
 	s.v3.kept.DropFunc(func(k keptKey) bool { return first <= k.id && k.id <= last })
+	if s.NoSync {
+		q := &s.v3.writes
+		q.mu.Lock()
+		for id := range q.faults {
+			if first <= id && id <= last {
+				delete(q.faults, id)
+			}
+		}
+		q.mu.Unlock()
+	}
 	s.v3.maxSizes.retireRange(first, last)
 	s.forEachConn(func(c *conn) { c.v3sizes.retireRange(first, last) })
 	s.listMu.Lock()
@@ -201,6 +217,9 @@ func (s *Server) forEachConn(fn func(*conn)) {
 }
 
 func (s *Server) forgetFileSize(id uint64) {
+	if s.NoSync {
+		s.v3.writes.takeFault(id) // the removed file can have no later COMMIT
+	}
 	s.v3.maxSizes.forget(id)
 	s.forEachConn(func(c *conn) { c.v3sizes.forget(id) })
 }

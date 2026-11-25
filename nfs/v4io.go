@@ -120,6 +120,11 @@ func (x *v4compound) write() status {
 	if s := regular4(info); s != stOK {
 		return s
 	}
+	if x.s.NoSync {
+		if err := x.s.v3.writes.takeFault(cur.id); err != nil {
+			return statusOf(err)
+		}
+	}
 	if offset > math.MaxInt64-uint64(len(data)) {
 		return stFBig
 	}
@@ -177,7 +182,11 @@ func (x *v4compound) commit() status {
 	if s != stOK {
 		return s
 	}
-	if !x.s.NoSync {
+	if x.s.NoSync {
+		if err := x.s.v3.writes.takeFault(cur.id); err != nil {
+			return statusOf(err)
+		}
+	} else {
 		var writer billy.File
 		if kept := x.s.v4.commitWriter(cur.id); kept != nil {
 			defer x.s.v4.release(kept)

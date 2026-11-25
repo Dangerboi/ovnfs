@@ -51,9 +51,9 @@ func TestV3CachedWritesPreserveOffsets(t *testing.T) {
 		copy(want[i*block:], data)
 		wg.Go(func() {
 			for range 32 {
-				n, err := s.writeAt3(id, 0, "file", data, int64(i*block), false)
-				if err != nil || n != len(data) {
-					t.Errorf("write at %d: %d bytes, %v", i*block, n, err)
+				r, err := s.writeAt3(id, 0, "file", data, int64(i*block), false)
+				if err != nil || r.count != len(data) {
+					t.Errorf("write at %d: %d bytes, %v", i*block, r.count, err)
 					return
 				}
 			}

@@ -662,6 +662,24 @@ func (r *Registry) Close() error {
 // The caller supplies a non-nil, zero or completed session and must call Done
 // after using its FS and Gen. Enter leaves the session unchanged on failure.
 func (r *Registry) Enter(name string, s *Session) error {
+	if barrier := r.writeBarrier.Load(); barrier != nil {
+		release, err := (*barrier)(context.Background())
+		if err != nil {
+			return err
+		}
+		if err = r.EnterWriter(name, s); err != nil {
+			release()
+			return err
+		}
+		s.resume = release
+		return nil
+	}
+	return r.EnterWriter(name, s)
+}
+
+// EnterWriter is Enter for the frontend that owns the write barrier: it
+// must be able to apply buffered bytes while a direct observer is draining.
+func (r *Registry) EnterWriter(name string, s *Session) error {
 	r.mu.RLock()
 	h := r.checkouts[name]
 	closed := r.closed

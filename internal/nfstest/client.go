@@ -49,11 +49,16 @@ type Client struct {
 // Start serves backend on an ephemeral loopback port, mounts its root, and registers cleanup.
 func Start(t testing.TB, backend nfs.Backend) *Client {
 	t.Helper()
+	return Serve(t, &nfs.Server{FS: backend})
+}
+
+// Serve drives a configured server over the same TCP transport as Start.
+func Serve(t testing.TB, srv *nfs.Server) *Client {
+	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &nfs.Server{FS: backend}
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(l) }()
 	t.Cleanup(func() { _ = l.Close(); <-done })

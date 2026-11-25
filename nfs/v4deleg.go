@@ -404,9 +404,9 @@ func (x *v4compound) conflict(file uint64) status {
 
 // conflictName is conflict for the regular file name in directory dir, if
 // there is one, and returns its id for changed once the change is made
-// (0 while nothing is delegated or being granted, which spares the lookup).
+// (0 when no client cache or outstanding write error needs identifying).
 func (x *v4compound) conflictName(dir, name string) (uint64, status) {
-	if !x.s.v4.active() && !x.s.v3.readers.active() {
+	if !x.s.v4.active() && !x.s.v3.readers.active() && (!x.s.NoSync || !x.s.v3.writes.hasFaults()) {
 		return 0, stOK
 	}
 	p := v4Join(dir, name)

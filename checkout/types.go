@@ -170,7 +170,8 @@ type Config struct {
 type Registry struct {
 	mu           sync.RWMutex
 	config       Config
-	mounts       []string // config.Mount and its resolved spelling; see underMount
+	writeBarrier atomic.Pointer[func(context.Context) (func(), error)] // NFS write-behind; installed before serving
+	mounts       []string                                              // config.Mount and its resolved spelling; see underMount
 	store        *store.Store
 	node         string
 	stateLock    *os.File
@@ -295,6 +296,7 @@ type Session struct {
 	Gen    uint64
 	record *checkoutRecord
 	began  stats.Tick // when Enter returned, for the checkout's call timer
+	resume func()     // releases any deferred-write exclusion after the freeze lock
 	done   atomic.Bool
 }
 
@@ -305,6 +307,7 @@ func (s *Session) pin(h *checkoutRecord) {
 	s.Gen = h.generation.Load()
 	s.record = h
 	s.began = h.calls.Start()
+	s.resume = nil
 	s.done.Store(false)
 }
 
@@ -317,6 +320,9 @@ func (s *Session) Done() {
 	if s != nil && s.record != nil && s.done.CompareAndSwap(false, true) {
 		s.record.calls.Since(s.began)
 		s.record.freeze.RUnlock()
+		if s.resume != nil {
+			s.resume()
+		}
 	}
 }
 

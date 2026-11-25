@@ -357,6 +357,12 @@ func (s *Server) postOp3(e *encoder, id uint64, p string) {
 // wcc3 appends wcc_data: the wcc_attr of pre (nil: absent), then the
 // current attributes of file id at p.
 func (s *Server) wcc3(e *encoder, pre *attrs, id uint64, p string) {
+	preAttrs3(e, pre)
+	s.postOp3(e, id, p)
+}
+
+// preAttrs3 encodes the pre-change size and timestamps shared by WCC replies.
+func preAttrs3(e *encoder, pre *attrs) {
 	if pre == nil {
 		e.bool(false)
 	} else {
@@ -365,7 +371,6 @@ func (s *Server) wcc3(e *encoder, pre *attrs, id uint64, p string) {
 		time3(e, pre.mtime)
 		time3(e, pre.mtime) // ctime
 	}
-	s.postOp3(e, id, p)
 }
 
 // sattr3 is a decoded sattr3: the attributes a client sets.

@@ -20,6 +20,12 @@ import (
 
 // Router dispatches export-relative paths to the registry's current checkout view.
 type Router struct {
+	*routerState
+	writeSource atomic.Bool // a serving write-behind owner drains its own operations
+}
+
+// routerState shares checkout incarnations and the path cache across protocol views.
+type routerState struct {
 	reg    *checkout.Registry
 	lifeMu sync.Mutex
 	lives  map[string]*routerLife
@@ -43,7 +49,7 @@ const routerWriteFlags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREATE | o
 
 // NewRouter returns the virtual export root backed by reg.
 func NewRouter(reg *checkout.Registry) *Router {
-	return &Router{reg: reg, lives: make(map[string]*routerLife)}
+	return &Router{routerState: &routerState{reg: reg, lives: make(map[string]*routerLife)}}
 }
 
 // life returns the current incarnation token while the caller holds a checkout session.
@@ -77,7 +83,12 @@ func splitRouterPath(name string) (string, string) {
 
 // enter translates registry lookup errors to filesystem errors.
 func (r *Router) enter(co, op, name string, s *checkout.Session) error {
-	err := r.reg.Enter(co, s)
+	var err error
+	if r.writeSource.Load() {
+		err = r.reg.EnterWriter(co, s)
+	} else {
+		err = r.reg.Enter(co, s)
+	}
 	if err != nil {
 		var e *checkout.Error
 		if errors.As(err, &e) && e.Code == "not_found" {

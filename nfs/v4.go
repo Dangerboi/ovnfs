@@ -2,6 +2,7 @@ package nfs
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path"
 	"strings"
@@ -126,6 +127,10 @@ func (s *Server) nfs4(c *call, res *encoder) acceptStat {
 	case proc4Null:
 		return rpcSuccess
 	case proc4Compound:
+		if s.NoSync {
+			_ = s.v3.writes.exclude(context.Background(), 0)
+			defer s.v3.writes.allow(0)
+		}
 		defer s.changes.invalidate()
 		defer s.timers.compound.Since(s.timers.compound.Start())
 		return s.compound4(c, res)

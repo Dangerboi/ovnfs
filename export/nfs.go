@@ -1,6 +1,7 @@
 package export
 
 import (
+	"context"
 	"os"
 	"syscall"
 	"time"
@@ -21,7 +22,19 @@ type nfsFS struct {
 // export's recall hook: the server recalls the delegations an NFS request
 // conflicts with itself, and recalling the requesting client's own delegation
 // races with the reply that granted it.
-func (e *Export) NFS() nfs.Backend { return &nfsFS{protocolFS: e.protocolFS(), handles: e.handles} }
+func (e *Export) NFS() nfs.Backend {
+	rt := &Router{routerState: e.rt.routerState}
+	return &nfsFS{
+		protocolFS: protocolFS{nodeFS: &nodeFS{Filesystem: rt, Change: rt, rt: rt}, volume: e.volume},
+		handles:    e.handles,
+	}
+}
+
+// SetWriteBarrier enrolls every direct observer before NFS starts admitting writes.
+func (n *nfsFS) SetWriteBarrier(fn func(context.Context) (func(), error)) {
+	n.rt.writeSource.Store(true)
+	n.rt.reg.SetWriteBarrier(fn)
+}
 
 // ChildID identifies an entry of a listing of dir without a syscall.
 func (n *nfsFS) ChildID(dir string, info os.FileInfo) uint64 { return n.rt.childID(dir, info) }

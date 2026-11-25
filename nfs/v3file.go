@@ -8,7 +8,6 @@ import (
 	"path"
 
 	"github.com/go-git/go-billy/v5"
-	"github.com/stencil-hq/ovnfs/internal/kept"
 )
 
 // vanishedInfo returns the pre-fence metadata of a fenced cache-root handle
@@ -35,6 +34,11 @@ func (s *Server) getattr3(d *decoder, res *encoder) status {
 		var info os.FileInfo
 		p, st := s.path3(id, gen, ok)
 		if st == stOK {
+			if s.NoSync {
+				if err := s.v3.writes.readFault(id); err != nil {
+					return statusOf(err)
+				}
+			}
 			var err error
 			_, info, err = s.describe(id, gen, p)
 			if err != nil {
@@ -260,6 +264,11 @@ func (s *Server) read3(d *decoder, res *encoder) status {
 		if st != stOK {
 			return st
 		}
+		if s.NoSync {
+			if err := s.v3.writes.readFault(id); err != nil {
+				return statusOf(err)
+			}
+		}
 		cacheable := s.FS.Cacheable(p)
 		var (
 			a   attrs
@@ -421,65 +430,33 @@ func (s *Server) write3(d *decoder, res *encoder) status {
 	if how > fileSync3 {
 		return stInval
 	}
-	if count > math.MaxInt32 || off > math.MaxInt64 {
+	if count > math.MaxInt32 {
 		return stFBig
 	}
-	// The filehandle names the object to write, not a path to follow.
-	p, info, err := s.describe(id, gen, p)
+	data = data[:min(len(data), int(count))]
+	if off > math.MaxInt64-uint64(len(data)) {
+		return stFBig
+	}
+	s.recallAttrs(id, typeReg)
+	r, err := s.writeAt3(id, gen, p, data, int64(off), how != unstable3 && !s.NoSync)
+	s.recallAttrs(id, typeReg)
 	if err != nil {
 		return statusOf(err)
 	}
-	if !info.Mode().IsRegular() {
-		return stInval
+	res.pending = r.pending
+	preAttrs3(res, &r.pre)
+	if r.post.fileid == 0 {
+		res.bool(false)
+	} else {
+		postAttrs3(res, &r.post)
 	}
-	pre := attrsOf(id, info)
-	s.recallAttrs(id, pre.typ)
-	n, err := s.writeAt3(id, gen, p, data[:min(len(data), int(count))], int64(off), how != unstable3 && !s.NoSync)
-	s.recallAttrs(id, pre.typ)
-	if err != nil {
-		return statusOf(err)
-	}
-	s.wcc3(res, &pre, id, p)
-	res.u32(uint32(n))
+	res.u32(uint32(r.count))
 	if how != unstable3 || s.NoSync {
 		how = fileSync3
 	}
 	res.u32(how)
 	res.fixed(s.verf[:])
 	return stOK
-}
-
-// writeAt3 reuses the writer for id at p, or opens one where id is now
-// ([Server.openHandle]), falling back to a descriptor kept before write
-// permission was removed when a fresh open is denied.
-func (s *Server) writeAt3(id, gen uint64, p string, data []byte, off int64, stable bool) (int, error) {
-	key := keptKey{id: id, path: p}
-	var n int
-	write := func(f billy.File) (err error) {
-		n, err = kept.WriteAt(f, data, off)
-		if err == nil && stable {
-			err = s.FS.SyncFile(p, id, gen, f)
-		}
-		return err
-	}
-	if ok, err := s.v3.kept.With(key, write); ok {
-		return n, err
-	}
-	f, at, _, err := s.openHandle(id, gen, p, os.O_WRONLY)
-	if err != nil {
-		if errors.Is(err, os.ErrPermission) {
-			if ok, kerr := s.v3.kept.With(keptKey{id: id}, write); ok {
-				return n, kerr
-			}
-		}
-		return 0, err
-	}
-	p = at // the stable write syncs the file where it is
-	if err := write(f); err != nil {
-		f.Close()
-		return n, err
-	}
-	return n, s.v3.kept.Keep(keptKey{id: id, path: p}, f)
 }
 
 // commit3 answers COMMIT (section 3.3.21), syncing the whole file even when
@@ -496,7 +473,11 @@ func (s *Server) commit3(d *decoder, res *encoder) status {
 	if st != stOK {
 		return st
 	}
-	if !s.NoSync {
+	if s.NoSync {
+		if err := s.v3.writes.takeFault(id); err != nil {
+			return statusOf(err)
+		}
+	} else {
 		flush := func(f billy.File) error { return s.FS.SyncFile(p, id, gen, f) }
 		found, err := s.v3.kept.With(keptKey{id: id, path: p}, flush)
 		if !found {

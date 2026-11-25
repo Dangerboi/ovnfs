@@ -26,12 +26,31 @@ func (r *Registry) Quiesce(ctx context.Context) (func(), error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	if r.config.Quiesce == nil {
+	barrier := r.writeBarrier.Load()
+	if r.config.Quiesce == nil && barrier == nil {
 		return func() {}, nil
 	}
 	wait := newBounded(ctx, quiesceLimit)
 	defer wait.cancel()
-	release, err := r.config.Quiesce(wait)
+	var release func()
+	var err error
+	if r.config.Quiesce != nil {
+		release, err = r.config.Quiesce(wait)
+		if err == nil && release == nil {
+			return nil, failure("io", "write-cache quiesce returned no release")
+		}
+	}
+	if err == nil && barrier != nil {
+		var resume func()
+		resume, err = (*barrier)(wait)
+		if resume != nil {
+			if prior := release; prior != nil {
+				release = func() { resume(); prior() }
+			} else {
+				release = resume
+			}
+		}
+	}
 	if err == nil {
 		err = wait.expired()
 	}
@@ -45,6 +64,12 @@ func (r *Registry) Quiesce(ctx context.Context) (func(), error) {
 		return nil, failure("io", "write-cache quiesce returned no release")
 	}
 	return release, nil
+}
+
+// SetWriteBarrier registers the file server's daemon-side write cache with
+// direct checkout operations and filesystem calls made by other frontends.
+func (r *Registry) SetWriteBarrier(fn func(context.Context) (func(), error)) {
+	r.writeBarrier.Store(&fn)
 }
 
 // bounded is context.WithTimeout(parent, limit) whose timer, and the

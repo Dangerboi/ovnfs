@@ -405,7 +405,11 @@ func (c *conn) answer(rec []byte, cl *call, e *encoder) {
 	}
 	e.put32(0, lastFragment|uint32(e.len()-4))
 	*rb = e.buf
-	sent := c.send(rb, e.sizePending)
+	sent := c.send(rb, e.sizePending || e.pending != nil)
+	if e.pending != nil {
+		c.srv.answered(e.pending)
+		e.pending = nil
+	}
 	e.finishSize(sent)
 	cl.args = decoder{}
 	e.buf = nil

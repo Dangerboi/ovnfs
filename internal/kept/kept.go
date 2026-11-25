@@ -74,35 +74,63 @@ func (c *Cache[K]) Keep(key K, f billy.File) error {
 // It also closes f if key is already cached or every slot is busy. Any
 // descriptor closed here reports its error to the caller.
 func (c *Cache[K]) KeepIf(key K, f billy.File, allow func() bool) error {
-	c.mu.Lock()
-	if allow != nil && !allow() {
-		c.mu.Unlock()
-		return f.Close()
+	_, err := c.insert(key, f, allow, false)
+	return err
+}
+
+// Adopt pins a newly opened file until release. Like Keep it takes ownership
+// even if the cache is full: then release closes f instead of retaining it.
+func (c *Cache[K]) Adopt(key K, f billy.File) (release func(), err error) {
+	e, err := c.insert(key, f, nil, true)
+	if e == nil {
+		return func() { _ = f.Close() }, err
 	}
-	if _, ok := c.files[key]; ok {
+	return func() { e.mu.Unlock(); c.release(e) }, err
+}
+
+// insert optionally pins f before making it visible to other cache users.
+func (c *Cache[K]) insert(key K, f billy.File, allow func() bool, pin bool) (*entry[K], error) {
+	c.mu.Lock()
+	var evicted billy.File
+	admit := (allow == nil || allow()) && c.files[key] == nil
+	if admit && len(c.files) >= c.max() {
+		evicted = c.evictLocked()
+		admit = evicted != nil
+	}
+	if !admit {
 		c.mu.Unlock()
-		return f.Close()
+		if pin {
+			return nil, nil
+		}
+		return nil, f.Close()
 	}
 	if c.files == nil {
 		c.files = make(map[K]*list.Element)
 	}
-	var evicted billy.File
-	if len(c.files) >= c.max() {
-		evicted = c.evictLocked()
-		if evicted == nil {
-			c.mu.Unlock()
-			return f.Close()
-		}
-	}
 	e := &entry[K]{key: key, f: f}
+	if pin {
+		e.users++
+		e.mu.Lock()
+	}
 	c.files[key] = c.lru.PushFront(e)
 	c.count.Add(1)
 	e.timer = time.AfterFunc(c.idle(), func() { c.expire(e) })
 	c.mu.Unlock()
 	if evicted != nil {
-		return evicted.Close()
+		return e, evicted.Close()
 	}
-	return nil
+	return e, nil
+}
+
+// Borrow holds a kept file exclusively until release, including across
+// goroutines; eviction, Drop and Close cannot close it during this use.
+func (c *Cache[K]) Borrow(key K) (f billy.File, release func()) {
+	e := c.acquire(key)
+	if e == nil {
+		return nil, nil
+	}
+	e.mu.Lock()
+	return e.f, func() { e.mu.Unlock(); c.release(e) }
 }
 
 // With serializes fn on key's kept file; ok is false when there is none.
@@ -118,17 +146,10 @@ func (c *Cache[K]) WithShared(key K, fn func(billy.File) error) (ok bool, err er
 }
 
 func (c *Cache[K]) with(key K, shared bool, fn func(billy.File) error) (ok bool, err error) {
-	c.mu.Lock()
-	el := c.files[key]
-	if el == nil {
-		c.mu.Unlock()
+	e := c.acquire(key)
+	if e == nil {
 		return false, nil
 	}
-	e := el.Value.(*entry[K])
-	e.users++
-	c.lru.MoveToFront(el)
-	c.mu.Unlock()
-
 	if shared {
 		e.mu.RLock()
 		err = fn(e.f)
@@ -138,7 +159,26 @@ func (c *Cache[K]) with(key K, shared bool, fn func(billy.File) error) (ok bool,
 		err = fn(e.f)
 		e.mu.Unlock()
 	}
+	c.release(e)
+	return true, err
+}
 
+// acquire reserves one user before waiting on the entry's IO lock.
+func (c *Cache[K]) acquire(key K) *entry[K] {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el := c.files[key]
+	if el == nil {
+		return nil
+	}
+	e := el.Value.(*entry[K])
+	e.users++
+	c.lru.MoveToFront(el)
+	return e
+}
+
+// release closes a dropped entry once its last user is done with it.
+func (c *Cache[K]) release(e *entry[K]) {
 	c.mu.Lock()
 	e.users--
 	closing := e.gone && e.users == 0
@@ -149,7 +189,6 @@ func (c *Cache[K]) with(key K, shared bool, fn func(billy.File) error) (ok bool,
 	if closing {
 		e.f.Close()
 	}
-	return true, err
 }
 
 // Drop forgets key's kept file and closes it, at once when it is idle, else

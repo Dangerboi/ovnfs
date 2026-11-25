@@ -277,6 +277,7 @@ func (x *v4compound) remove() status {
 	if id != 0 {
 		// A delegation granted while the file was being removed.
 		x.changed(id)
+		x.s.forgetGoneFault(id)
 	}
 	cinfo.put(x.e)
 	return stOK
@@ -336,6 +337,7 @@ func (x *v4compound) rename() status {
 	// mtime) a rename moves.
 	if replaced != 0 {
 		x.changed(replaced)
+		x.s.forgetGoneFault(replaced)
 	}
 	if moved != 0 {
 		x.changed(moved)

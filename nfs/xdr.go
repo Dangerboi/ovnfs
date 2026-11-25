@@ -99,6 +99,7 @@ type encoder struct {
 	maxSizes                  *maxReportedSizes
 	sizeID, size, sampled     uint64
 	sizePending, sizeAccepted bool
+	pending                   *pendingFile // release acknowledged ranges after send
 }
 
 // u32 appends an unsigned int, enum or bool discriminant.

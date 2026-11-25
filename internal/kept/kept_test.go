@@ -143,6 +143,31 @@ func TestWithSharedRunsConcurrently(t *testing.T) {
 	}
 }
 
+// TestPinSurvivesCacheClose covers both an existing borrower and an adopted
+// file that could not fit. Closing or evicting cannot steal either pin.
+func TestPinSurvivesCacheClose(t *testing.T) {
+	c := Cache[int]{Max: 1}
+	var closes, overflow int
+	if err := c.Keep(1, closeCount{closes: &closes}); err != nil {
+		t.Fatal(err)
+	}
+	_, release := c.Borrow(1)
+	unpin, err := c.Adopt(2, closeCount{closes: &overflow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	if closes != 0 || overflow != 0 {
+		t.Fatalf("closed pinned files: %d, %d", closes, overflow)
+	}
+	release()
+	unpin()
+	c.Close()
+	if closes != 1 || overflow != 1 {
+		t.Fatalf("closes after last use = %d, %d", closes, overflow)
+	}
+}
+
 // TestKeepIfRejectsAndCloses checks that KeepIf closes f without caching when
 // its predicate rejects insertion.
 func TestKeepIfRejectsAndCloses(t *testing.T) {

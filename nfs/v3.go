@@ -1,6 +1,7 @@
 package nfs
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -63,6 +64,7 @@ type v3State struct {
 	// here: clients may send their buffered writes afterwards. NFSv4 keeps
 	// those permission fallbacks per open instead (keepWritable).
 	kept     kept.Cache[keptKey]
+	writes   writeQueue
 	readers  readCache
 	verfs    createVerfs
 	maxSizes maxReportedSizes
@@ -120,6 +122,18 @@ func (s *Server) nfs3(c *call, res *encoder) acceptStat {
 	res.u32(uint32(stOK))
 	timer := s.timers.v3[c.proc]
 	began := timer.Start()
+	if s.NoSync && c.proc != v3Write {
+		// Single-object calls exclude just their file; a directory handle
+		// alone cannot identify the children a namespace call will touch.
+		var id uint64
+		switch c.proc {
+		case v3GetAttr, v3SetAttr, v3Read, v3Readlink, v3Access, v3Commit, v3PathConf, v3FSStat, v3FSInfo:
+			d := c.args
+			id, _, _ = d.fh(maxFH3)
+		}
+		_ = s.v3.writes.exclude(context.Background(), id)
+		defer s.v3.writes.allow(id)
+	}
 	st := p.run(s, &c.args, res)
 	timer.Since(began)
 	if c.args.err != nil {

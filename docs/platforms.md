@@ -96,6 +96,14 @@ file the memory tier would have kept off the disk. A crash of the daemon or
 the host can then lose writes the client was told are stable, as it can lose
 any other recent change (see [persistence](internals.md#persistence)).
 
+In this mode NFSv3 can reply before applying a regular-file WRITE. The daemon
+copies the bytes before replying and drains them before a reader, namespace
+change or direct checkout operation needs them. A backend error after the
+reply is logged and reported on the file's next WRITE or COMMIT; the original
+caller cannot be notified if it never sends another one. Use `--fsync` when a
+write must not be acknowledged before it is applied. See
+[write-behind](internals.md#nfsv3-write-behind).
+
 A client can implement `fsync` of dirty data with these requests; NFS has
 no standalone file or directory `fsync` RPC. An application `fsync` that
 sends no WRITE or COMMIT cannot force an empty create, rename or other
