@@ -202,6 +202,11 @@ func TestHardLinksBelowACacheRootPartOnWrite(t *testing.T) {
 // behind the same fence. It removes snapshots on disk no checkout names.
 func TestCacheSnapshotsSurviveRestart(t *testing.T) {
 	f := newFixture(t)
+	if err := f.reg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.frozenLocal = true
+	f.open()
 	dir := folder(t, map[string]string{"src/main": "one", "target/out": "one", "target/kept": "kept", ".env": "SECRET=1"})
 	f.newCheckout(dir, "a", "cache dir & target")
 	id, _, _ := f.checkoutCaches("a")
@@ -235,11 +240,69 @@ func TestCacheSnapshotsSurviveRestart(t *testing.T) {
 	})
 }
 
+func TestLocalVirtualDefaultAndFrozenOptIn(t *testing.T) {
+	f := newFixture(t)
+	dir := folder(t, map[string]string{"src/main": "one", ".env": "private", "local/keep": "original", "local/owned": "from-host"})
+	// Default mode is virtual: local paths forward directly to the folder until written.
+	f.newCheckout(dir, "virtual", "local dir & local")
+	if got := f.read("virtual", ".env"); got != "private" {
+		t.Fatalf("default virtual local file = %q", got)
+	}
+	if got := f.read("virtual", "local/keep"); got != "original" {
+		t.Fatalf("default virtual local dir = %q", got)
+	}
+	f.put("virtual", "local/owned", "written-in-checkout")
+
+	reopen := func(frozen bool) {
+		t.Helper()
+		if err := f.reg.Close(); err != nil {
+			t.Fatal(err)
+		}
+		f.frozenLocal = frozen
+		f.open()
+	}
+	reopen(true)
+	f.newCheckout(dir, "frozen", "local dir & local")
+	if got := f.read("frozen", ".env"); got != "private" {
+		t.Fatalf("frozen local file = %q", got)
+	}
+
+	write(t, filepath.Join(dir, ".env"), "changed")
+	write(t, filepath.Join(dir, "local/keep"), "edited")
+	write(t, filepath.Join(dir, "local/owned"), "host-overwrite")
+	write(t, filepath.Join(dir, "local/new"), "added")
+
+	checkViews := func() {
+		t.Helper()
+		for _, check := range []struct{ checkout, path, want string }{
+			{"virtual", ".env", "changed"},
+			{"virtual", "local/keep", "edited"},
+			{"virtual", "local/new", "added"},
+			{"virtual", "local/owned", "written-in-checkout"},
+			{"frozen", ".env", "private"},
+			{"frozen", "local/keep", "original"},
+			{"frozen", "local/new", "<absent>"},
+		} {
+			if got := f.read(check.checkout, check.path); got != check.want {
+				t.Errorf("%s/%s = %q, want %q", check.checkout, check.path, got, check.want)
+			}
+		}
+	}
+	checkViews()
+	reopen(false)
+	checkViews()
+}
+
 // TestCacheRootsOfPreparedCheckouts gives a checkout taken from a folder's
 // prepared pool the folder's cache roots as of its create, not as of its
 // preparation.
 func TestCacheRootsOfPreparedCheckouts(t *testing.T) {
 	f := newFixture(t)
+	if err := f.reg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.frozenLocal = true
+	f.open()
 	dir := folder(t, map[string]string{"src/main": "one", ".env": "SECRET=1"})
 	f.newCheckout(dir, "a")
 	_, root, _ := f.checkoutCaches("a")

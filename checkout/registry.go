@@ -1193,7 +1193,7 @@ func (r *Registry) baseReservedLocked(id string) bool {
 
 // baseConfig supplies storage and nonblocking event callbacks to a base.
 func (r *Registry) baseConfig(id string) base.Config {
-	return base.Config{ID: id, StateDir: filepath.Join(r.config.State, "bases", id), Store: r.store, Stats: r.config.Stats, StopTakes: r.stop, DiscardTree: r.discard, OnFault: func(message string) { r.enqueueNotice(baseNotice{base: id, fault: message}) }}
+	return base.Config{ID: id, StateDir: filepath.Join(r.config.State, "bases", id), Store: r.store, Stats: r.config.Stats, StopTakes: r.stop, DiscardTree: r.discard, FrozenLocal: r.config.FrozenLocal, OnFault: func(message string) { r.enqueueNotice(baseNotice{base: id, fault: message}) }}
 }
 
 // enqueueNotice avoids taking registry locks inside base exposure locks.

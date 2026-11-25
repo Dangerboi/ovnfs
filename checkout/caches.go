@@ -10,9 +10,9 @@ import (
 
 // A checkout of a local base reads the folder's cache and local roots as its
 // cache snapshot (base.Caches) fixes them, never as the folder has them now:
-// the local roots are the snapshot's copies, the cache roots the folder's own
-// entries that did not change since the snapshot began. A checkout opened on
-// a base uses the base's newest snapshot, and takes a new one when there is
+// local roots forward directly to the folder by default, or are copied at
+// checkout open when FrozenLocal is set; cache roots use a time fence.
+// A checkout uses the base's newest snapshot, and takes a new one when there is
 // none or the folder changed at those roots since the newest began, as far
 // as the folder watcher reported; without the watcher covering the folder
 // every checkout takes its own. Checkouts already open keep theirs. A
@@ -24,7 +24,7 @@ import (
 // when it is named, so it sees the folder as of its create.
 
 // cachesPattern accepts cache snapshot names.
-var cachesPattern = regexp.MustCompile(`^c_[0-9a-f]{12}$`)
+var cachesPattern = regexp.MustCompile(`^cv?_[0-9a-f]{12}$`)
 
 // baseCaches is the cache snapshot bookkeeping of a local base, guarded by
 // Registry.cachesMu.
@@ -52,7 +52,11 @@ func (r *Registry) useCaches(b *baseRecord) (*base.Caches, error) {
 	defer r.cachesMu.Unlock()
 	bc := &b.caches
 	if bc.newest == nil || bc.stale || r.watcher == nil || !r.watcher.Covers(m.Dir) {
-		id, err := randomID("c_")
+		prefix := base.VirtualCachesPrefix
+		if r.config.FrozenLocal {
+			prefix = "c_"
+		}
+		id, err := randomID(prefix)
 		if err != nil {
 			return nil, err
 		}
@@ -133,7 +137,7 @@ func (r *Registry) cachesChangedLocked(changes []watch.Change) {
 		}
 		dir := b.view.Meta().Dir
 		for _, c := range changes {
-			if rel, ok := below(dir, c.Path); ok && b.view.CachesAffectedBy(rel) {
+			if rel, ok := below(dir, c.Path); ok && bc.newest.AffectedBy(b.view, rel) {
 				bc.stale = true
 				break
 			}

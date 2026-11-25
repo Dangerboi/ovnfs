@@ -44,6 +44,7 @@ type entry struct {
 	n        uint32      // its index node, for a source path; its root's otherwise
 	snapshot bool        // the cache snapshot's copy of a local root serves it
 	fenced   bool        // host is at or below a cache root
+	live     bool        // host is at or below a virtual local root
 	folder   os.FileInfo // host's own lstat data, for a fenced entry
 }
 
@@ -139,6 +140,9 @@ func (v bottom) ReadDir(p string) ([]os.FileInfo, error) {
 	if e.fenced {
 		return v.fencedDir(p)
 	}
+	if e.live {
+		return v.liveDir(p)
+	}
 	// Both lists are sorted. Native metadata serves every present child;
 	// captured names missing from the host still retain their fork-time info.
 	// Names the capture never saw are not in the view.
@@ -224,6 +228,13 @@ func (v bottom) OpenInfo(p string) (overlay.Content, os.FileInfo, error) {
 		c, err := v.openFenced(p, e)
 		return c, e.info, err
 	}
+	if e.live {
+		f, err := hostfile.Open(e.host)
+		if err != nil {
+			return nil, nil, inView("open", p, err)
+		}
+		return f, e.info, nil
+	}
 	if e.host != "" {
 		f, err := hostfile.Open(e.host)
 		if err == nil {
@@ -270,7 +281,7 @@ func (v bottom) Readlink(p string) (string, error) {
 		case e.snapshot:
 			target, err = v.c.files.readlink(p)
 			target = b.relocate(b.lower(p), target)
-		case e.fenced:
+		case e.fenced || e.live:
 			if target, err = os.Readlink(e.host); err != nil {
 				return "", inView("readlink", p, err)
 			}
@@ -382,6 +393,8 @@ func (v bottom) resolve(p string) (entry, error) {
 func (v bottom) below(p, root string, n uint32, class rules.Class, listing bool) (entry, error) {
 	switch {
 	case v.c == nil:
+	case class == rules.Local && v.c.virtual:
+		return v.live(p, root, n)
 	case class == rules.Local:
 		info, err := v.c.lstat(p, root, n, listing)
 		return entry{info: info, snapshot: true}, err

@@ -110,6 +110,7 @@ func serveDefaults(conf manifest.Daemon) kong.Option {
 		"nfs_nointr_default":  cmp.Or(os.Getenv("OVNFS_NFS_NOINTR"), conf.NFSNoIntr, "false"),
 		"nfs_xattrs_default":  cmp.Or(os.Getenv("OVNFS_NFS_XATTRS"), conf.NFSXattrs, "false"),
 		"git_remotes_default": cmp.Or(os.Getenv("OVNFS_GIT_REMOTES"), conf.GitRemotes, "true"),
+		"local_default":       cmp.Or(os.Getenv("OVNFS_LOCAL"), conf.Local, "virtual"),
 		"idle_exit_default":   cmp.Or(os.Getenv("OVNFS_IDLE_EXIT"), defaultIdleExit.String()),
 	}
 }
@@ -124,8 +125,9 @@ type serveCmd struct {
 	Atime      bool     `help:"Allow access time updates on the mount." default:"${atime_default}"`
 	NFSIOSize  byteSize `name:"nfs-io-size" help:"NFS read/write transfer size (power of two, 4K to 1M)." default:"${nfs_io_size_default}"`
 	NFSNoIntr  bool     `name:"nfs-nointr" help:"Do not interrupt macOS NFS requests on signals. A stalled server can block indefinitely." default:"${nfs_nointr_default}"`
-	GitRemotes bool     `help:"Give each source repository a git remote ovnfs/NAME per checkout of it." default:"${git_remotes_default}" negatable:""`
 	NFSXattrs  bool     `name:"nfs-xattrs" help:"Keep the ._ files macOS NFS clients store extended attributes in; by default the daemon stores none and attributes last only in the client's cache." default:"${nfs_xattrs_default}" negatable:""`
+	GitRemotes bool     `help:"Give each source repository a git remote ovnfs/NAME per checkout of it." default:"${git_remotes_default}" negatable:""`
+	Local      string   `name:"local" help:"How local paths are served in new checkouts: virtual (default, read from the folder until written) or frozen (clone or copy at open)." default:"${local_default}" enum:"virtual,frozen"`
 
 	IdleExit time.Duration `name:"idle-exit" help:"Unmount and exit after this long with no checkouts and no admin connection; the next client starts another daemon. 0 never exits." default:"${idle_exit_default}"`
 }
@@ -244,7 +246,7 @@ func (cmd *serveCmd) Run(c *cli) (err error) {
 	}
 	defer rec.Close() // after the registry's, whose final work it records
 	reg, err := checkout.Open(checkout.Config{State: state, Mount: mount, UserHome: userHome, Node: node, Emit: hub.emit, Fetch: lk.fetch, Search: lk.search,
-		Memory: mem, BlobCache: int64(cmd.BlobCache), GitRemotes: cmd.GitRemotes, Logf: log.Printf, Stats: rec,
+		Memory: mem, BlobCache: int64(cmd.BlobCache), GitRemotes: cmd.GitRemotes, FrozenLocal: cmd.Local == "frozen", Logf: log.Printf, Stats: rec,
 		Quiesce: func(ctx context.Context) (func(), error) {
 			if s := smbServer.Load(); s != nil {
 				return s.Quiesce(ctx)

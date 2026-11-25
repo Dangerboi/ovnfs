@@ -11,7 +11,7 @@ func TestServeOptions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	for _, name := range []string{"OVNFS_MEMORY", "OVNFS_BLOB_CACHE", "OVNFS_ATIME", "OVNFS_FSYNC", "OVNFS_NFS_IO_SIZE", "OVNFS_NFS_NOINTR", "OVNFS_NFS_XATTRS"} {
+	for _, name := range []string{"OVNFS_MEMORY", "OVNFS_BLOB_CACHE", "OVNFS_ATIME", "OVNFS_FSYNC", "OVNFS_NFS_IO_SIZE", "OVNFS_NFS_NOINTR", "OVNFS_NFS_XATTRS", "OVNFS_LOCAL"} {
 		t.Setenv(name, "")
 	}
 	t.Setenv("OVNFS_IDLE_EXIT", "")
@@ -27,7 +27,7 @@ func TestServeOptions(t *testing.T) {
 	}
 
 	cmd, err := parse()
-	if err != nil || cmd.Proto != defaultProto() || cmd.Memory != 64<<20 || cmd.BlobCache != 16<<20 || cmd.Atime || cmd.Fsync || cmd.NFSNoIntr || cmd.NFSXattrs {
+	if err != nil || cmd.Proto != defaultProto() || cmd.Memory != 64<<20 || cmd.BlobCache != 16<<20 || cmd.Atime || cmd.Fsync || cmd.NFSNoIntr || cmd.NFSXattrs || cmd.Local != "virtual" {
 		t.Fatalf("defaults: %+v, %v", cmd, err)
 	}
 	if cmd.IdleExit != defaultIdleExit {
@@ -48,9 +48,9 @@ func TestServeOptions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	writeConfig("proto: smb\nmemory: 3G\nblob_cache: 128M\nfsync: true\natime: true\nnfs_nointr: true\nnfs_xattrs: true\n")
+	writeConfig("proto: smb\nmemory: 3G\nblob_cache: 128M\nfsync: true\natime: true\nnfs_nointr: true\nnfs_xattrs: true\nlocal: frozen\n")
 	cmd, err = parse()
-	if err != nil || cmd.Proto != "smb" || cmd.Memory != 3<<30 || cmd.BlobCache != 128<<20 || !cmd.Fsync || !cmd.Atime || !cmd.NFSNoIntr || !cmd.NFSXattrs {
+	if err != nil || cmd.Proto != "smb" || cmd.Memory != 3<<30 || cmd.BlobCache != 128<<20 || !cmd.Fsync || !cmd.Atime || !cmd.NFSNoIntr || !cmd.NFSXattrs || cmd.Local != "frozen" {
 		t.Fatalf("user config: %+v, %v", cmd, err)
 	}
 	writeConfig("proto: nfs\nmemory: 0\nblob_cache: 0\nfsync: false\natime: false\nnfs_nointr: false\n")
@@ -99,6 +99,18 @@ func TestServeOptions(t *testing.T) {
 	cmd, err = parse("--nfs-xattrs")
 	if err != nil || !cmd.NFSXattrs {
 		t.Fatalf("nfs-xattrs flag: %+v, %v", cmd, err)
+	}
+	t.Setenv("OVNFS_LOCAL", "frozen")
+	cmd, err = parse()
+	if err != nil || cmd.Local != "frozen" {
+		t.Fatalf("local environment: %+v, %v", cmd, err)
+	}
+	cmd, err = parse("--local", "virtual")
+	if err != nil || cmd.Local != "virtual" {
+		t.Fatalf("local flag over environment: %+v, %v", cmd, err)
+	}
+	if _, err := parse("--local", "unknown"); err == nil {
+		t.Fatal("unknown --local value accepted")
 	}
 	if _, err := parse("--memory", "-1"); err == nil {
 		t.Fatal("negative memory accepted")

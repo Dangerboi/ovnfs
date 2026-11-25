@@ -98,7 +98,7 @@ Opening a folder classifies every path into one of four classes:
 | --- | --- | --- | --- |
 | `source` | as captured at open | hashed: the snapshot's identity | sent by content id |
 | `cache` | the folder's own files, as far as it has not changed them since the checkout opened; copy-on-write | not hashed | an empty directory, rebuilt there |
-| `local` | a copy of the folder's, taken when the checkout opened; copy-on-write | not hashed | absent |
+| `local` | the folder's own files, live until written; copied at open with `local: frozen`; copy-on-write | not hashed | absent |
 | `hidden` | absent | — | absent |
 
 Nothing is copied to make the source view. A source file is the folder's own
@@ -108,17 +108,21 @@ not; a file the user adds later stays out. If the folder truncates the file
 after a checkout reader opened it, the reader continues at the same offset
 in the captured content. Copy-up uses the same check.
 
-Cache and local paths never show the folder as it is now either. A *cache
-snapshot*, taken when the checkout opens, fixes what the checkout sees of
-both, each in the way that suits what it holds.
-
 **Local** paths (ignored files, secrets such as `.env`, files over 100 MB)
-are few and must stay whole, so the snapshot copies them, below
-`STATE/bases/BASE/caches/`: sharing their blocks where the volume can (APFS
-clonefile, reflinks on Btrfs and XFS, block cloning on ReFS and Dev Drive),
-byte by byte elsewhere. It does so in the background: creating a checkout
-never waits, the first access to a local path does. An `.env` the folder
-edits later stays as it was in the checkouts already open.
+are **virtual by default** (`local: virtual`): nothing is copied or
+cloned when a checkout opens. If the checkout has not written the path, reads
+forward straight to the folder with no locks and no fence; host edits may show
+through until the checkout writes its own copy (copy-on-write into its upper).
+Local paths stay out of snapshots and transfers.
+
+To opt into isolated, frozen local copies instead, run
+`ovnfs config set local frozen` then `ovnfs restart` (or
+`serve --local frozen` / `OVNFS_LOCAL=frozen`). New checkouts then
+copy local roots below `STATE/bases/BASE/caches/` in the background — sharing
+blocks where the volume can (APFS `clonefile`, reflinks on Btrfs and XFS,
+block cloning on ReFS and Dev Drive), and copying bytes with a warning
+elsewhere — so an `.env` edited on the host stays unchanged in open checkouts.
+Existing checkouts keep the mode they opened with.
 
 **Cache** paths (ignored directories: build output, `node_modules`) are read
 where they are. Nothing of them is copied, indexed or deleted again, so a
@@ -271,6 +275,7 @@ env:
 | `nfs_nointr` | boolean | user file only: disable signal interruption on macOS NFS (default false) |
 | `nfs_xattrs` | boolean | user file only: keep the `._` files macOS NFS clients store extended attributes in (default false) |
 | `git_remotes` | boolean | user file only: give a repository a git remote `ovnfs/NAME` per checkout (default true) |
+| `local` | string | user file only: how new checkouts serve `local` paths — `virtual` (default, read live from the folder until written) or `frozen` (clone/copy at open) |
 
 `rules` is a block scalar (`rules: |`) with one `<class> <predicate>` per line.
 Blank lines and lines starting with `#` are skipped; `#` after whitespace
@@ -325,8 +330,8 @@ ovnfs config edit --global
 
 The keys are `rules`, `cache.ROOT.rebuild`, `cache.ROOT.key`, `env.image`,
 `env.setup` and the daemon settings `state`, `mount`, `proto`, `memory`,
-`fsync`, `blob_cache`, `atime`, `nfs_io_size`, `nfs_nointr`, `nfs_xattrs` and
-`git_remotes`.
+`fsync`, `blob_cache`, `atime`, `nfs_io_size`, `nfs_nointr`, `nfs_xattrs`,
+`git_remotes` and `local`.
 A cache root may hold dots (`cache.web/.next.key`) and matches its entry
 however it is spelled (`cache.web/dist.rebuild` finds `./web/dist`).
 `rules`, `env.setup` and

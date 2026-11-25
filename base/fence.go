@@ -191,6 +191,64 @@ func (v bottom) fencedDir(p string) ([]os.FileInfo, error) {
 	return out, nil
 }
 
+// live serves p, at or below virtual local root root (index node n), straight
+// from the folder without copying or fencing. The root keeps its Capture
+// identity (valid on any volume); deeper entries use the folder's inode and
+// show only where the folder is on the state's volume.
+func (v bottom) live(p, root string, n uint32) (entry, error) {
+	b, vol := v.b, v.c.fence.volume
+	if p != root && vol == 0 || !b.lowerAncestorsAreDirs(p) {
+		return entry{}, absent(p)
+	}
+	host := b.lower(p)
+	info, err := hostfile.Lstat(host)
+	if err != nil {
+		return entry{}, inView("lstat", p, err)
+	}
+	if p != root && !onVolume(info, vol) {
+		return entry{}, absent(p)
+	}
+	e := entry{host: host, n: n, live: true}
+	if p == root {
+		e.info = hostInfo{FileInfo: info, id: captureID(n)}
+	} else {
+		e.info = v.c.locator.lookupInfo(info, host, p)
+	}
+	return e, nil
+}
+
+// liveDir lists directory p, at or below a virtual local root, straight from
+// the folder without fencing, skipping entries on other volumes.
+func (v bottom) liveDir(p string) ([]os.FileInfo, error) {
+	vol := v.c.fence.volume
+	if vol == 0 {
+		return []os.FileInfo{}, nil
+	}
+	dir := v.b.lower(p)
+	entries, err := fsys.ReadDir(dir)
+	if err != nil {
+		return nil, inView("readdir", p, err)
+	}
+	out := make([]os.FileInfo, 0, len(entries))
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // removed during the listing
+			}
+			return nil, inView("readdir", p, err)
+		}
+		var host string
+		if runtime.GOOS == "windows" {
+			host = filepath.Join(dir, e.Name())
+		}
+		if info = hostfile.Linked(info, host); onVolume(info, vol) {
+			out = append(out, v.c.locator.listedInfo(info, host, p))
+		}
+	}
+	return out, nil
+}
+
 // openFenced opens the regular folder file that e, from [bottom.fenced] of
 // p, describes. The folder may have changed it since that lookup: the open
 // file must be the one looked up and still shown.

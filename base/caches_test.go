@@ -17,6 +17,7 @@ import (
 	"github.com/stencil-hq/ovnfs/internal/ident"
 	"github.com/stencil-hq/ovnfs/internal/search/fsys"
 	"github.com/stencil-hq/ovnfs/overlay"
+	"github.com/stencil-hq/ovnfs/source"
 )
 
 // read returns the content of p in view.
@@ -523,6 +524,82 @@ func TestLinksIntoTheFolderAreRelative(t *testing.T) {
 			t.Errorf("readlink %s = %q, %v; want %q", link, got, err, want)
 		}
 	}
+}
+
+// TestVirtualLocalForwardsLive checks virtual local snapshots (cv_ prefix):
+// reads forward straight to the folder without copying or fencing, open files
+// keep reading across host edits, standalone local files work even without a
+// shared volume, and local-only bases write no cache snapshot directory.
+func TestVirtualLocalForwardsLive(t *testing.T) {
+	repo, dir := repository(t)
+	writeTestFile(t, filepath.Join(dir, ".env"), "SECRET=1")
+	writeTestFile(t, filepath.Join(dir, "local", "item"), "v1")
+	outside := t.TempDir()
+	writeTestFile(t, filepath.Join(outside, "leak"), "outside")
+	b, _ := createTestBase(t, repo, func(_ *Config, o *source.Options) {
+		prepend(t, o, "local dir & local")
+	})
+	c := b.TakeCaches(VirtualCachesPrefix + "1")
+	c.Wait()
+	if ids, err := b.CachesIDs(); err != nil || len(ids) != 0 {
+		t.Fatalf("virtual local-only base created snapshot dirs: %v, %v", ids, err)
+	}
+	view := b.Bottom(c)
+	openFile, err := view.Open(".env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer openFile.Close()
+
+	// Host edits apply live instead of vanishing behind a fence.
+	writeTestFile(t, filepath.Join(dir, ".env"), "SECRET=2")
+	writeTestFile(t, filepath.Join(dir, "local", "item"), "v2")
+	writeTestFile(t, filepath.Join(dir, "local", "added"), "new")
+	if err := os.Symlink(outside, filepath.Join(dir, "local", "escape")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 32)
+	if n, err := openFile.ReadAt(buf, 0); err != nil && !errors.Is(err, io.EOF) || string(buf[:n]) != "SECRET=2" {
+		t.Errorf("open virtual local file after host rewrite = %q, %v; want live bytes without ESTALE", buf[:n], err)
+	}
+	for p, want := range map[string]string{".env": "SECRET=2", "local/item": "v2", "local/added": "new"} {
+		if got := read(t, view, p); got != want {
+			t.Errorf("%s = %q, want %q", p, got, want)
+		}
+	}
+	if _, err := view.Lstat("local/escape/leak"); err == nil {
+		t.Error("symlink inside virtual local root escaped folder")
+	}
+	for _, p := range []string{".env", "local/item"} {
+		info, err := view.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, ok := ident.Of(info)
+		if !ok {
+			t.Fatalf("%s has no identity", p)
+		}
+		if got, found := view.Locate(id); !found || got != p {
+			t.Errorf("Locate(%s) = %q, %v; want %q", p, got, found, p)
+		}
+	}
+	if c.AffectedBy(b, ".env") || c.AffectedBy(b, "local/item") {
+		t.Error("virtual snapshot marked stale by local-root edits")
+	}
+
+	// Cross-volume: standalone local file keeps working via Capture id; local dir starts empty.
+	cross := b.newCaches(VirtualCachesPrefix + "2")
+	cross.fence = fence{}
+	cross.finish()
+	b.serve(cross)
+	crossView := b.Bottom(cross)
+	if got := read(t, crossView, ".env"); got != "SECRET=2" {
+		t.Errorf("cross-volume standalone virtual local file = %q, want SECRET=2", got)
+	}
+	if got := names(t, crossView, "local"); len(got) != 0 {
+		t.Errorf("cross-volume virtual local dir = %v, want empty", got)
+	}
+	gone(t, crossView, "cross-volume local dir child", "local/item")
 }
 
 // TestCachesAffectedBy marks a snapshot stale only for changes at, below or

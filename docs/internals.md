@@ -329,31 +329,37 @@ deletes those files in the background when it starts.
 
 ## Cache and local roots
 
-Checkouts never read the folder's cache and local roots as they are now: a
-host build rewriting `target/` would hand them output newer than their
-sources. A cache snapshot (`base.Caches`) fixes both. One is taken when a
+A cache snapshot (`base.Caches`) mediates a checkout's cache and local roots:
+cache roots are always fenced so a host build rewriting `target/` cannot hand
+a checkout output newer than its sources, while local roots are virtual by
+default and copied only with `local: frozen`. One is taken when a
 checkout opens and the base has none, or the folder watcher reported a change
-at, below or above a root since the newest began; checkouts opened meanwhile
-share the newest, and a checkout records its snapshot's id in `state.json`
-(`caches`). A snapshot no checkout uses is moved to the trash by garbage
-collection, and one on disk no checkout names by the next start.
+at, below or above an affected root since the newest began; checkouts opened
+meanwhile share the newest, and a checkout records its snapshot's id in
+`state.json` (`caches`). A snapshot no checkout uses is moved to the trash by
+garbage collection, and one on disk no checkout names by the next start.
 
-**Local roots are copied** below the base's `caches/<id>/tree/`, in the
-background: with `clonefile(2)` on APFS, a reflink per file where the volume
-has them, bytes elsewhere; first the roots that are no directory, then the
-directories. At most two snapshots copy local directories at once across the
-daemon. A snapshot without local directories needs no slot. A stop cancels
-queued copies and skips directories not yet started; an in-progress native
-copy finishes. `roots.json`, written last, marks the snapshot complete; one a
-stop interrupted is taken again when its checkout reopens. Its previous tree
-goes to the trash, not its newly recorded fence. A root directory
-presents the folder's metadata of when the snapshot began and its capture
-node's identity, so listing its parent waits only for the first step;
-anything below a local root waits for the copy, before the overlay takes its
-lock (`overlay.Awaiter`). The copies are snapshot files with `State`
-identities. On macOS and Linux a snapshot holds its `tree/` open and resolves
-lookups relative to it (`fstatat`, `openat`, `readlinkat`), so the kernel
-does not walk the dozen components of the snapshot's absolute path each time.
+**Local roots are virtual by default** (`local: virtual`, persisted in
+the snapshot ID prefix `cv_`). Nothing is copied or cloned and no tree or lock
+is held: lookups and opens at or below a local root forward directly to the
+folder (`base/fence.go: live` / `liveDir`) until the checkout writes its own
+copy into its upper. Standalone local files keep their `Capture` node identity
+(valid across volumes); entries inside local directories use folder inodes.
+A base with no cache roots writes no snapshot directory at all in virtual mode,
+and local-root edits do not mark the base's newest snapshot stale.
+
+With opt-in `local: frozen` (prefix `c_`), local roots are copied below
+the base's `caches/<id>/tree/` in the background: with `clonefile(2)` on APFS,
+a reflink per file where the volume has them, bytes elsewhere (with a warning);
+first non-directory roots, then directories (at most two across the daemon).
+`roots.json`, written last, marks the snapshot complete; one a stop
+interrupted is taken again when its checkout reopens. Its previous tree goes
+to the trash, not its newly recorded fence. A root directory presents the
+folder's metadata of when the snapshot began and its capture node's identity,
+so listing its parent waits only for the first step; anything below a local
+root waits for the copy before the overlay takes its lock (`overlay.Awaiter`).
+The copies are snapshot files with `State` identities; macOS and Linux hold
+`tree/` open for `fstatat`/`openat`/`readlinkat`.
 
 **Cache roots are not copied.** A clone of one is cheap to make and dear to
 unmake: `clonefile(2)` takes 10 µs an entry and the unlink that undoes it 45

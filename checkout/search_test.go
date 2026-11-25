@@ -58,39 +58,57 @@ func TestSearchMergedCheckoutWithoutMount(t *testing.T) {
 	}
 }
 
-// TestSearchIgnoreRulesAndSnapshotPaths searches cache and local paths as the
-// checkout's cache snapshot holds them, not the folder as it is now.
+// TestSearchIgnoreRulesAndSnapshotPaths checks ignore rules, hidden-class
+// exclusion, and local-path search under both default virtual and opt-in
+// frozen local modes.
 func TestSearchIgnoreRulesAndSnapshotPaths(t *testing.T) {
-	f := newFixture(t)
-	dir := folder(t, map[string]string{
-		".gitignore": "ignored/\n", "keep.txt": "needle\n", "ignored/local.txt": "needle\n",
-		".hidden.txt": "needle\n", "secret.txt": "needle\n", "node_modules/pkg/index.js": "needle\n",
-	})
-	f.newCheckout(dir, "search", "hidden secret.txt", "local ignored & dir")
-	write(t, filepath.Join(dir, "ignored", "local.txt"), "needle after the snapshot\n")
-	defaults, err := f.reg.Glob(t.Context(), api.GlobArgs{Checkout: "search", Pattern: "*.txt"})
-	if err != nil || !slices.Equal(globPaths(defaults), []string{"keep.txt"}) {
-		t.Fatalf("default ignores: %+v, %v", defaults, err)
-	}
-	all, err := f.reg.Grep(t.Context(), api.GrepArgs{
-		Checkout: "search", Hidden: true, NoIgnore: true, NodeModules: true, Pattern: "needle",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var paths []string
-	for _, match := range all.Matches {
-		paths = append(paths, match.Path)
-		if match.Path == "ignored/local.txt" && match.Text != "needle" {
-			t.Fatalf("a local path was searched in the folder, not the snapshot: %+v", match)
+	for _, frozen := range []bool{false, true} {
+		name := "virtual"
+		wantLocal := "needle after the edit"
+		if frozen {
+			name = "frozen"
+			wantLocal = "needle"
 		}
-	}
-	if !slices.Equal(paths, []string{".hidden.txt", "ignored/local.txt", "keep.txt", "node_modules/pkg/index.js"}) {
-		t.Fatalf("visibility overrides must not reveal hidden-class paths: %v", paths)
-	}
-	node, err := f.reg.Glob(t.Context(), api.GlobArgs{Checkout: "search", Pattern: "node_modules/**/*.js"})
-	if err != nil || !slices.Equal(globPaths(node), []string{"node_modules/pkg/index.js"}) {
-		t.Fatalf("explicit node_modules pattern: %+v, %v", node, err)
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			if frozen {
+				if err := f.reg.Close(); err != nil {
+					t.Fatal(err)
+				}
+				f.frozenLocal = true
+				f.open()
+			}
+			dir := folder(t, map[string]string{
+				".gitignore": "ignored/\n", "keep.txt": "needle\n", "ignored/local.txt": "needle\n",
+				".hidden.txt": "needle\n", "secret.txt": "needle\n", "node_modules/pkg/index.js": "needle\n",
+			})
+			f.newCheckout(dir, "search", "hidden secret.txt", "local ignored & dir")
+			write(t, filepath.Join(dir, "ignored", "local.txt"), "needle after the edit\n")
+			defaults, err := f.reg.Glob(t.Context(), api.GlobArgs{Checkout: "search", Pattern: "*.txt"})
+			if err != nil || !slices.Equal(globPaths(defaults), []string{"keep.txt"}) {
+				t.Fatalf("default ignores: %+v, %v", defaults, err)
+			}
+			all, err := f.reg.Grep(t.Context(), api.GrepArgs{
+				Checkout: "search", Hidden: true, NoIgnore: true, NodeModules: true, Pattern: "needle",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var paths []string
+			for _, match := range all.Matches {
+				paths = append(paths, match.Path)
+				if match.Path == "ignored/local.txt" && match.Text != wantLocal {
+					t.Fatalf("ignored/local.txt = %q, want %q", match.Text, wantLocal)
+				}
+			}
+			if !slices.Equal(paths, []string{".hidden.txt", "ignored/local.txt", "keep.txt", "node_modules/pkg/index.js"}) {
+				t.Fatalf("visibility overrides must not reveal hidden-class paths: %v", paths)
+			}
+			node, err := f.reg.Glob(t.Context(), api.GlobArgs{Checkout: "search", Pattern: "node_modules/**/*.js"})
+			if err != nil || !slices.Equal(globPaths(node), []string{"node_modules/pkg/index.js"}) {
+				t.Fatalf("explicit node_modules pattern: %+v, %v", node, err)
+			}
+		})
 	}
 }
 

@@ -1,11 +1,10 @@
 // Package base provides persistent, fork-time views of a captured source folder.
 //
 // A base is the bottom of every checkout opened from one capture. Source-class
-// paths come from the capture's tree: from the folder while unchanged since
-// the fork time (cloned on first exposure), else from the store or the
-// folder's git objects. Cache- and local-class roots come from a copy-on-write
-// snapshot of them that the checkout uses (see [Caches]), never from the
-// folder as it is now; a checkout's writes copy up into its own upper. Hidden
+// paths read from the folder while unchanged, then from the captured tree's
+// store or Git objects. Cache roots read unchanged entries in place; local
+// roots read from a private snapshot (see [Caches]). A checkout's writes
+// copy up into its own upper. Hidden
 // roots and source paths that appeared after the fork do not exist in the view.
 package base
 
@@ -80,6 +79,7 @@ type Mirror interface {
 type Config struct {
 	ID, StateDir string
 	Store        *store.Store
+	FrozenLocal  bool            // copy/clone local roots at checkout open instead of reading them live
 	Fetch        Fetcher         // remote bases only
 	Mirror       Mirror          // remote bases only; nil reads everything through Fetch
 	Stats        *stats.Recorder // records how long cache snapshots take; nil records nothing
@@ -100,15 +100,17 @@ type Base struct {
 	domains   *source.Domains
 	objectsMu sync.Mutex
 	objects   map[string]*git.Objects // object readers by work tree top
-	// cacheRoots lists the capture's cache and local roots, sorted.
-	cacheRoots []string
-	proofs     dirProofs // folder directories proven real, for lookups below cache roots
-	mu         sync.Mutex
-	caches     map[string]*Caches // mu: the cache snapshots served, by id
-	closing    chan struct{}      // closed before Close waits for active takes
-	closeOnce  sync.Once
-	closeErr   error
-	remote     *remoteState
+	// cacheRoots lists the capture's cache and local roots, sorted;
+	// fencedRoots holds only the cache roots.
+	cacheRoots  []string
+	fencedRoots []string
+	proofs      dirProofs // folder directories proven real, for lookups below cache roots
+	mu          sync.Mutex
+	caches      map[string]*Caches // mu: the cache snapshots served, by id
+	closing     chan struct{}      // closed before Close waits for active takes
+	closeOnce   sync.Once
+	closeErr    error
+	remote      *remoteState
 	// lfsLocks serialize producing LFS objects, striped by object id, so
 	// concurrent first opens of one object run one git lfs smudge.
 	lfsLocks [16]sync.Mutex
@@ -173,7 +175,12 @@ func Capture(ctx context.Context, c Config, o source.Options) (source.Result, []
 	}
 	var warnings []string
 	if lowerDev != stateDev {
-		warnings = append(warnings, "source is on another volume than the state; pins, stored blobs and local paths are byte copies instead of clones, and cache directories start empty in checkouts")
+		warning := "source is on another volume than the state; stored blobs"
+		if c.FrozenLocal {
+			warning += " and local paths"
+		}
+		warning += " are byte copies instead of clones, and cache directories start empty in checkouts"
+		warnings = append(warnings, warning)
 	}
 	o.Store, o.State = c.Store, c.StateDir
 	res, err := source.Capture(ctx, o)
@@ -271,7 +278,7 @@ func available(c Config, m Meta, repos []source.Repo) []source.Repo {
 // newBase serves an open capture index.
 func newBase(c Config, m Meta, x *captureIndex, stats api.Capture, domains *source.Domains) *Base {
 	m.ForkTime = m.ForkTime.UTC()
-	b := &Base{config: c, meta: m, index: x, stats: stats, domains: domains, objects: make(map[string]*git.Objects), cacheRoots: cacheRootsOf(x), caches: make(map[string]*Caches), closing: make(chan struct{})}
+	b := &Base{config: c, meta: m, index: x, stats: stats, domains: domains, objects: make(map[string]*git.Objects), cacheRoots: cacheRootsOf(x), fencedRoots: fencedRootsOf(x), caches: make(map[string]*Caches), closing: make(chan struct{})}
 	if m.Remote != nil {
 		b.remote = &remoteState{b: b, prefetched: map[string]bool{}}
 	}
@@ -430,8 +437,7 @@ func (b *Base) Close() error {
 		for _, c := range b.served() {
 			// A snapshot being taken still writes its tree, below the
 			// base's storage: it ends before its files close.
-			c.Wait()
-			c.files.close()
+			c.close()
 		}
 		b.closeErr = errors.Join(errs...)
 	})

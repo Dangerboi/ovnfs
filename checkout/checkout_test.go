@@ -29,6 +29,7 @@ type fixture struct {
 	mu           sync.Mutex
 	invalidated  []invalidation  // Config.Invalidate calls, in order
 	gitRemotes   bool            // Config.GitRemotes at the next open
+	frozenLocal  bool            // Config.FrozenLocal at the next open
 	stats        *stats.Recorder // Config.Stats at the next open
 }
 
@@ -82,7 +83,7 @@ func newFixture(t *testing.T) *fixture {
 
 // config is the registry configuration of the fixture's state.
 func (f *fixture) config() Config {
-	return Config{State: f.state, Mount: f.mount, Node: "n_" + filepath.Base(filepath.Dir(f.state)), Memory: overlay.NewMemory(64<<20, 1<<20, 0), BlobCache: 64 << 20, GitRemotes: f.gitRemotes, Stats: f.stats,
+	return Config{State: f.state, Mount: f.mount, Node: "n_" + filepath.Base(filepath.Dir(f.state)), Memory: overlay.NewMemory(64<<20, 1<<20, 0), BlobCache: 64 << 20, GitRemotes: f.gitRemotes, FrozenLocal: f.frozenLocal, Stats: f.stats,
 		Invalidate: func(checkout string, paths, trees []string) {
 			f.mu.Lock()
 			f.invalidated = append(f.invalidated, invalidation{checkout: checkout, paths: slices.Clone(paths), trees: slices.Clone(trees)})

@@ -158,6 +158,9 @@ type Config struct {
 	// GitRemotes gives a source repository a git remote ovnfs/<name> for each
 	// live checkout of it (see Registry.syncRemotes); off, ovnfs removes them.
 	GitRemotes bool
+	// FrozenLocal clones or copies local roots of new checkouts at open
+	// instead of forwarding reads directly to the folder.
+	FrozenLocal bool
 	// Logf reports how long Open spent on each part of the state, so a slow
 	// start names its cause; nil is silent.
 	Logf func(format string, args ...any)

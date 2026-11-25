@@ -13,8 +13,11 @@
   checkout, which then fails to open it and rebuilds it when run again, and
   a dependency install in the folder removes the replaced packages from the
   checkouts already open (see [configuration](configuration.md#classes)).
-- A folder on another volume than the state gets its cache directories empty
-  in checkouts, and its local paths copied whole into each snapshot.
+- A folder on another volume than the state gets its cache directories (and,
+  in default `local: virtual`, `local` directories) empty in checkouts;
+  standalone virtual `local` files (such as `.env`) still work across volumes.
+  With opt-in `local: frozen`, local paths are byte-copied rather than
+  reflinked across volumes.
 - A tracked file the user changes after open is read from the repository's
   objects; pruning those objects can make it unreadable.
 - Files from git (`--rev`, `--take` from the index or a revision) go through

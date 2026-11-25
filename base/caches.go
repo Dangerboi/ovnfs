@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,12 +26,12 @@ import (
 // folder hands no checkout newer output and no folder event invalidates one.
 // The two classes are fixed differently, by what they hold:
 //
-//   - Local roots are few and must stay whole (an .env the folder edits must
-//     not leave a running checkout), so the snapshot copies them below the
-//     base's state (cachesDir/ID/treeDir/ROOT), sharing their blocks where
-//     the volume can (APFS clonefile(2), FICLONE, block cloning on ReFS) and
-//     copying bytes elsewhere. They are taken in the background: checkout
-//     creation never waits, the first access at a local root does.
+//   - Local roots (secrets, ignored files, large files) are virtual by default:
+//     reads forward straight to the folder with no copy, clone or lock until
+//     the checkout writes them. With local: frozen, the snapshot copies
+//     them below the base's state (cachesDir/ID/treeDir/ROOT), sharing blocks
+//     where the volume can (APFS clonefile(2), FICLONE, block cloning on ReFS)
+//     and copying bytes elsewhere, in the background.
 //   - Cache roots hold hundreds of thousands of files a checkout mostly never
 //     reads, so nothing of them is copied: the snapshot is a fence, the
 //     instant it began, and the checkout reads the folder's own entries that
@@ -38,15 +39,19 @@ import (
 //     state's volume; elsewhere cache roots start empty, as on remote bases,
 //     and are rebuilt in the checkout.
 //
-// A snapshot is complete once rootsFile is written. A daemon stopped before
-// that retakes it on the next start (OpenCaches), with a new fence; nothing
-// at its local roots was served yet.
+// A frozen snapshot is complete once rootsFile is written. A daemon stopped
+// before that retakes it on the next start, with a new fence. A virtual
+// snapshot needs a fence file only when the base has cache roots.
 const (
 	cachesDir = "caches"
 	treeDir   = "tree"
 	rootsFile = "roots.json"
 	fenceFile = "fence"
 )
+
+// VirtualCachesPrefix identifies snapshots whose local roots forward directly
+// to the folder instead of being copied. Persisted as part of the snapshot ID.
+const VirtualCachesPrefix = "cv_"
 
 // Directory copies share two slots across all bases. A snapshot with no
 // local directories never queues, no matter how many cache roots it fences.
@@ -58,10 +63,11 @@ var takeSlots = make(chan struct{}, 2)
 // registry decides which checkouts share one: every checkout opened while the
 // folder did not change at those roots.
 type Caches struct {
-	id    string
-	dir   string // the snapshot's directory below the base's state
-	tree  string // dir's treeDir, the root-relative image of the folder's local roots
-	files *tree  // tree, resolving lookups below it
+	id      string
+	dir     string // the snapshot's directory below the base's state
+	tree    string // dir's treeDir, the root-relative image of the folder's local roots
+	files   *tree  // tree, resolving lookups below it
+	virtual bool   // local roots forward directly to the folder, not a copied tree
 	// fence is where the view of the cache roots ends, set before the
 	// snapshot is served.
 	fence fence
@@ -99,7 +105,10 @@ func (c *Caches) Wait() { <-c.done }
 func (b *Base) newCaches(id string) *Caches {
 	dir := filepath.Join(b.config.StateDir, cachesDir, id)
 	t := filepath.Join(dir, treeDir)
-	c := &Caches{id: id, dir: dir, tree: t, files: newTree(t), locator: newLocator(b.config.StateDir), listed: make(chan struct{}), done: make(chan struct{})}
+	c := &Caches{id: id, dir: dir, tree: t, locator: newLocator(b.config.StateDir), virtual: strings.HasPrefix(id, VirtualCachesPrefix), listed: make(chan struct{}), done: make(chan struct{})}
+	if !c.virtual {
+		c.files = newTree(t)
+	}
 	folder, errFolder := volumeID(b.meta.Dir)
 	if state, errState := volumeID(b.config.StateDir); errFolder == nil && errState == nil && folder == state {
 		c.fence.volume = folder
@@ -111,21 +120,27 @@ func (b *Base) newCaches(id string) *Caches {
 // snapshot shows the folder's cache roots.
 func (c *Caches) shared() bool { return c.fence.volume != 0 }
 
-// TakeCaches starts snapshot id of a local base: it sets the fence of the
-// cache roots now, copies the local roots in the background and returns at
-// once; any earlier content of id is replaced. The registry calls it when it
+// TakeCaches starts snapshot id of a local base. It sets the fence now and
+// starts any local-root copies in the background, replacing earlier content
+// of id if present. The registry calls it when it
 // opens a checkout and the newest snapshot is stale or missing.
 func (b *Base) TakeCaches(id string) *Caches {
 	c := b.newCaches(id)
-	if c.shared() {
+	if c.shared() && (!c.virtual || len(b.fencedRoots) != 0) {
 		at, err := c.stamp()
 		if err != nil {
 			b.fault(fmt.Sprintf("cache snapshot %s: %v; cache roots start empty", id, err))
+		} else {
+			c.fence.at = at
 		}
-		c.fence.at = at
+	}
+	if c.virtual {
+		c.finish()
 	}
 	b.serve(c)
-	go c.take(b)
+	if !c.virtual {
+		go c.take(b)
+	}
 	return c
 }
 
@@ -190,8 +205,10 @@ func (c *Caches) stamped() int64 {
 		at, _ := strconv.ParseInt(string(data), 10, 64)
 		return at
 	}
-	if info, err := os.Stat(filepath.Join(c.dir, rootsFile)); err == nil {
-		return info.ModTime().UnixNano()
+	if !c.virtual {
+		if info, err := os.Stat(filepath.Join(c.dir, rootsFile)); err == nil {
+			return info.ModTime().UnixNano()
+		}
 	}
 	return 0
 }
@@ -207,24 +224,42 @@ func (b *Base) OpenCaches(id string) *Caches {
 		return c
 	}
 	c = b.newCaches(id)
-	data, err := os.ReadFile(filepath.Join(c.dir, rootsFile))
-	if err == nil {
-		err = json.Unmarshal(data, &c.roots)
-	}
-	if err == nil {
-		err = c.files.open()
-	}
-	if err != nil {
-		return b.TakeCaches(id)
+	if !c.virtual {
+		data, err := os.ReadFile(filepath.Join(c.dir, rootsFile))
+		if err == nil {
+			err = json.Unmarshal(data, &c.roots)
+		}
+		if err == nil {
+			err = c.files.open()
+		}
+		if err != nil {
+			return b.TakeCaches(id)
+		}
 	}
 	if c.shared() {
 		c.fence.at = c.stamped()
+		if c.virtual && len(b.fencedRoots) != 0 && c.fence.at == 0 {
+			return b.TakeCaches(id)
+		}
 	}
+	c.finish()
+	b.serve(c)
+	return c
+}
+
+// finish makes a snapshot with no pending copies immediately available.
+func (c *Caches) finish() {
 	close(c.listed)
 	c.ready.Store(true)
 	close(c.done)
-	b.serve(c)
-	return c
+}
+
+// close waits for an active take before releasing the copied tree, if any.
+func (c *Caches) close() {
+	c.Wait()
+	if c.files != nil {
+		c.files.close()
+	}
 }
 
 // serve records c as served, so removing it or closing the base releases it.
@@ -261,8 +296,7 @@ func (b *Base) ReleaseCaches(id string) string {
 	delete(b.caches, id)
 	b.mu.Unlock()
 	if c != nil {
-		c.Wait()
-		c.files.close()
+		c.close()
 	}
 	return filepath.Join(b.config.StateDir, cachesDir, id)
 }
@@ -517,21 +551,47 @@ func cacheRootsOf(x *captureIndex) []string {
 	return roots
 }
 
-// CachesAffectedBy reports whether a folder change at p can make a cache
-// snapshot taken before it differ from one taken after: p is at or below a
-// cache or local root, or above one, or "" (the whole folder, when events
-// were lost). The registry's watcher marks the newest snapshot stale with it,
-// so the next checkout gets a newer fence and fresh copies.
+// fencedRootsOf lists, sorted, the cache roots of capture index x.
+func fencedRootsOf(x *captureIndex) []string {
+	var roots []string
+	x.eachRoot(func(p string, class rules.Class) {
+		if class == rules.Cache {
+			roots = append(roots, p)
+		}
+	})
+	slices.Sort(roots)
+	return roots
+}
+
+// CachesAffectedBy reports whether a folder change at p can make a frozen
+// cache snapshot taken before it differ from one taken after: p is at or below
+// a cache or local root, or above one, or "" (the whole folder, when events
+// were lost).
 func (b *Base) CachesAffectedBy(p string) bool {
-	if p == "" {
-		return len(b.cacheRoots) != 0
+	return b.rootsAffectedBy(b.cacheRoots, p, snapshotted)
+}
+
+// AffectedBy reports whether a folder change at p makes snapshot c stale.
+// A virtual snapshot ignores local-root edits since it reads them live.
+func (c *Caches) AffectedBy(b *Base, p string) bool {
+	if c.virtual {
+		return b.rootsAffectedBy(b.fencedRoots, p, func(class rules.Class) bool { return class == rules.Cache })
 	}
-	if _, root, class := b.find(p); root != "" && snapshotted(class) {
+	return b.CachesAffectedBy(p)
+}
+
+// rootsAffectedBy checks whether p is "", matches a root accepted by match,
+// or is an ancestor of any sorted entry in roots.
+func (b *Base) rootsAffectedBy(roots []string, p string, match func(rules.Class) bool) bool {
+	if p == "" {
+		return len(roots) != 0
+	}
+	if _, root, class := b.find(p); root != "" && match(class) {
 		return true
 	}
 	prefix := p + "/"
-	i, _ := slices.BinarySearch(b.cacheRoots, prefix)
-	return i < len(b.cacheRoots) && len(b.cacheRoots[i]) > len(prefix) && b.cacheRoots[i][:len(prefix)] == prefix
+	i, _ := slices.BinarySearch(roots, prefix)
+	return i < len(roots) && len(roots[i]) > len(prefix) && roots[i][:len(prefix)] == prefix
 }
 
 // fault reports a problem through the configured sink.

@@ -56,6 +56,11 @@ func (f *fixture) awaitTrash(labels ...string) {
 // a restart, while a checkout on the same base keeps its own.
 func TestDeadCacheSnapshotIsDeletedWhileServing(t *testing.T) {
 	f := newFixture(t)
+	if err := f.reg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.frozenLocal = true
+	f.open()
 	dir := folder(t, map[string]string{"src/main": "one", ".env": "SECRET=1"})
 	f.newCheckout(dir, "a")
 	first, root, _ := f.checkoutCaches("a")
