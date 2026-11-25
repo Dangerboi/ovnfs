@@ -529,17 +529,19 @@ func (cmd *applyCmd) Run(c *cli) error {
 // landCmd puts a checkout's commits on the branch checked out in its folder
 // and fails when it refused to.
 type landCmd struct {
-	Checkout string `arg:"" name:"CHECKOUT" help:"checkout whose commits to land" completion-predictor:"checkout"`
-	DryRun   bool   `name:"dry-run" help:"report without writing"`
-	Markers  bool   `name:"markers" help:"where a file conflicts with the folder's uncommitted edits, write conflict markers there instead of refusing"`
-	Rebase   bool   `name:"rebase" help:"replay a clean checkout's commits onto the moved branch without rewriting the checkout"`
+	Checkout  string `arg:"" name:"CHECKOUT" help:"checkout whose commits to land" completion-predictor:"checkout"`
+	DryRun    bool   `name:"dry-run" help:"report without writing"`
+	Markers   bool   `name:"markers" help:"where a file conflicts with the folder's uncommitted edits, write conflict markers there instead of refusing"`
+	Rebase    bool   `name:"rebase" help:"replay a clean checkout's commits onto the moved branch without rewriting the checkout"`
+	SkipDirty bool   `name:"skip-dirty" help:"land the commits although the checkout holds uncommitted changes, leaving those there"`
 }
 
 func (cmd *landCmd) Run(c *cli) error {
-	a := api.LandArgs{Checkout: cmd.Checkout, DryRun: cmd.DryRun, Markers: cmd.Markers, Rebase: cmd.Rebase}
+	a := api.LandArgs{Checkout: cmd.Checkout, DryRun: cmd.DryRun, Markers: cmd.Markers, Rebase: cmd.Rebase, SkipDirty: cmd.SkipDirty}
 	r, err := call[api.LandReply](c, "land", a)
 	if err != nil {
-		return c.predates(c.predates(err, true, "land", "land"), a.Rebase, "land.rebase", "land --rebase")
+		err = c.predates(c.predates(err, true, "land", "land"), a.Rebase, "land.rebase", "land --rebase")
+		return c.predates(err, a.SkipDirty, "land.skip_dirty", "land --skip-dirty")
 	}
 	again := paint(stderr, styleAccent, "ovnfs land "+a.Checkout)
 	if c.json {
@@ -586,8 +588,13 @@ func (cmd *landCmd) Run(c *cli) error {
 			fmt.Fprintf(stderr, "nothing to land: replay produced no new commits; checkout %s is unchanged\n", a.Checkout)
 			return nil
 		}
-		fmt.Fprintf(stderr, "%s: %s holds no commit beyond %s; `%s` merges its uncommitted changes\n",
-			paint(stderr, styleYellow, "nothing to land"), a.Checkout, r.Branch, paint(stderr, styleAccent, "ovnfs apply "+a.Checkout))
+		if r.Left == 0 {
+			fmt.Fprintf(stderr, "%s: %s holds no commit beyond %s\n", paint(stderr, styleYellow, "nothing to land"), a.Checkout, r.Branch)
+			return nil
+		}
+		fmt.Fprintf(stderr, "%s: %s holds no commit beyond %s; `%s` merges its %s\n",
+			paint(stderr, styleYellow, "nothing to land"), a.Checkout, r.Branch, paint(stderr, styleAccent, "ovnfs apply "+a.Checkout),
+			plural(r.Left, "uncommitted path", "uncommitted paths"))
 		return nil
 	}
 	fmt.Fprintf(stdout, "%s %s %s %s %s\n", paint(stdout, styleDim, "branch"), paint(stdout, styleAccent, r.Branch), paint(stdout, styleDim, "at"),

@@ -79,14 +79,14 @@ func TestLandKeepsTheFoldersEdits(t *testing.T) {
 	want := f.commit("second", map[string]string{"c.txt": "C\n", "new.txt": "new\n"})
 	f.put("work", "wip.txt", "not committed\n")
 
-	dry, err := f.reg.Land(ctx, api.LandArgs{Checkout: "work", DryRun: true})
+	dry, err := f.reg.Land(ctx, api.LandArgs{Checkout: "work", DryRun: true, SkipDirty: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := gitRun(t, f.dir, "rev-parse", "HEAD"); got != f.old || f.folderFile("c.txt") != "c\n" {
 		t.Fatalf("a dry run moved HEAD to %s or wrote c.txt", got)
 	}
-	land, err := f.reg.Land(ctx, api.LandArgs{Checkout: "work"})
+	land, err := f.reg.Land(ctx, api.LandArgs{Checkout: "work", SkipDirty: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,8 +117,8 @@ func TestLandKeepsTheFoldersEdits(t *testing.T) {
 	}
 	gitRun(t, f.dir, "fsck", "--strict")
 
-	again, err := f.reg.Land(ctx, api.LandArgs{Checkout: "work"})
-	if err != nil || again.Old != want || again.Commit != want || len(again.Applied)+len(again.Merged) != 0 {
+	again, err := f.reg.Land(ctx, api.LandArgs{Checkout: "work", SkipDirty: true})
+	if err != nil || again.Old != want || again.Commit != want || again.Left != 1 || len(again.Applied)+len(again.Merged) != 0 {
 		t.Errorf("landing again = %+v, %v; want nothing to land", again, err)
 	}
 }
@@ -134,7 +134,7 @@ func TestLandAfterCheckoutMovesPastCapture(t *testing.T) {
 	f.put("work", "b.txt", "upstream b\n")
 	want := f.commit("after sync", map[string]string{"a.txt": "checkout\ntwo\nthree\n"})
 	f.put("work", "wip.txt", "uncommitted\n")
-	reply, err := f.reg.Land(t.Context(), api.LandArgs{Checkout: "work"})
+	reply, err := f.reg.Land(t.Context(), api.LandArgs{Checkout: "work", SkipDirty: true})
 	if err != nil || reply.Commit != want || reply.Refused || reply.Left != 1 {
 		t.Fatalf("land after sync = %+v, %v; want one uncommitted path left", reply, err)
 	}
@@ -271,6 +271,83 @@ func TestLandRefusesBeforeWriting(t *testing.T) {
 				t.Errorf("the folder's files changed: a.txt = %q", got)
 			}
 		})
+	}
+}
+
+// TestLandRefusesUncommittedChanges checks that land stops before writing while
+// the checkout holds uncommitted source changes, which rm would discard: off
+// the commits' paths unless SkipDirty leaves them there, on those paths
+// always, since land would carry them into the folder as if committed, and
+// with no commit at all, where apply is the way back.
+func TestLandRefusesUncommittedChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		prepare   func(f *landFixture)
+		skipDirty bool
+		message   string // the conflict's message holds this; "" lands nothing and leaves Left uncommitted paths
+		left      int
+	}{
+		{name: "off the commits", message: "land work --skip-dirty", prepare: func(f *landFixture) {
+			f.commit("change", map[string]string{"a.txt": "ONE\ntwo\nthree\n"})
+			f.put("work", "wip.txt", "uncommitted\n")
+		}},
+		{name: "on the commits", skipDirty: true, message: "uncommitted changes in a.txt on top of the commits", prepare: func(f *landFixture) {
+			f.commit("change", map[string]string{"a.txt": "ONE\ntwo\nthree\n"})
+			f.put("work", "a.txt", "ONE\ntwo\nthree, uncommitted\n")
+		}},
+		{name: "no commit", message: "`ovnfs apply work`", prepare: func(f *landFixture) {
+			f.put("work", "b.txt", "uncommitted b\n")
+		}},
+		{name: "no commit, skipped", skipDirty: true, left: 1, prepare: func(f *landFixture) {
+			f.put("work", "b.txt", "uncommitted b\n")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLandFixture(t, "HEAD")
+			tc.prepare(f)
+			reply, err := f.reg.Land(t.Context(), api.LandArgs{Checkout: "work", SkipDirty: tc.skipDirty})
+			if tc.message == "" {
+				if err != nil || reply.Commit != f.old || reply.Left != tc.left {
+					t.Fatalf("land = %+v, %v; want nothing landed and %d uncommitted paths left", reply, err, tc.left)
+				}
+			} else if coded, ok := errors.AsType[*Error](err); !ok || coded.Code != "conflict" || !strings.Contains(coded.Message, tc.message) {
+				t.Fatalf("land = %+v, %v; want a conflict saying %q", reply, err, tc.message)
+			}
+			if got := gitRun(t, f.dir, "rev-parse", "HEAD"); got != f.old {
+				t.Errorf("HEAD moved to %s", got)
+			}
+			if got := gitRun(t, f.dir, "status", "--porcelain"); got != "" {
+				t.Errorf("the folder changed: %s", got)
+			}
+		})
+	}
+}
+
+// TestLandAfterPullCarriesTheFoldersEdits follows the way out a refused land
+// offers a checkout that can pull: the pull marks the folder's overlapping
+// edit in the checkout, the resolution stays uncommitted there, and land takes
+// it as no uncommitted change of the checkout's own, carrying it back so the
+// folder's edit stays uncommitted on top of the commit.
+func TestLandAfterPullCarriesTheFoldersEdits(t *testing.T) {
+	f := newLandFixture(t, "")
+	ctx := t.Context()
+	want := f.commit("change", map[string]string{"a.txt": "ONE\ntwo\nthree\n"})
+	write(t, filepath.Join(f.dir, "a.txt"), "the user's\ntwo\nthree\n")
+
+	refused, err := f.reg.Land(ctx, api.LandArgs{Checkout: "work"})
+	if err != nil || !refused.Refused || !refused.Pullable {
+		t.Fatalf("land = %+v, %v; want it refused with a pull offered", refused, err)
+	}
+	if pull, err := f.reg.PullFolder(ctx, api.PullArgs{Checkout: "work"}); err != nil || len(pull.Conflicts) != 1 {
+		t.Fatalf("pull = %+v, %v; want a.txt marked in the checkout", pull, err)
+	}
+	f.put("work", "a.txt", "ONE, the user's\ntwo\nthree\n")
+	landed, err := f.reg.Land(ctx, api.LandArgs{Checkout: "work"})
+	if err != nil || landed.Commit != want || len(landed.Conflicts) != 0 {
+		t.Fatalf("land after resolving in the checkout = %+v, %v", landed, err)
+	}
+	if got := gitRun(t, f.dir, "status", "--porcelain"); got != "M a.txt" || f.folderFile("a.txt") != "ONE, the user's\ntwo\nthree\n" {
+		t.Errorf("status = %q, a.txt = %q; want the resolution as the only uncommitted edit", got, f.folderFile("a.txt"))
 	}
 }
 

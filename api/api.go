@@ -19,9 +19,11 @@ var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob"
 // "apply.atomic" (ApplyArgs.Atomic), "rm.keep_commits" (RmArgs.KeepCommits),
 // "diff.paths" (DiffArgs.Paths), "diff.stat" (DiffArgs.Stat),
 // "new.base_checkout" (NewArgs.Base takes a checkout's name),
-// "glob.git_markers" (GlobArgs.GitMarkers), and "land.rebase" (LandArgs.Rebase).
+// "glob.git_markers" (GlobArgs.GitMarkers), "land.rebase" (LandArgs.Rebase),
+// and "land.skip_dirty" (LandArgs.SkipDirty).
 var Features = []string{"new.base", "diff.binary", "ls.select", "rm.sticky_snapshots", "prune.sticky_snapshots", "stop.keep_mount",
-	"pull.folder", "apply.atomic", "rm.keep_commits", "diff.paths", "diff.stat", "new.base_checkout", "glob.git_markers", "land.rebase"}
+	"pull.folder", "apply.atomic", "rm.keep_commits", "diff.paths", "diff.stat", "new.base_checkout", "glob.git_markers", "land.rebase",
+	"land.skip_dirty"}
 
 // Checkout is an isolated, copy-on-write copy of a source folder that an agent works in.
 type Checkout struct {
@@ -268,9 +270,9 @@ type ApplyReply struct {
 // paths those commits changed, so the folder's uncommitted edits stay: what
 // committing there would have left. The files merge as an atomic apply does,
 // and the branch moves only once they have; a branch that is not an ancestor
-// of the checkout's HEAD, staged changes on the commits' paths and a detached
-// HEAD in the folder are refused with code "conflict" before anything is
-// written.
+// of the checkout's HEAD, staged changes on the commits' paths, uncommitted
+// source changes in the checkout (see SkipDirty) and a detached HEAD in the
+// folder are refused with code "conflict" before anything is written.
 type LandArgs struct {
 	Checkout string `json:"checkout"`
 	DryRun   bool   `json:"dry_run,omitempty"`
@@ -282,12 +284,16 @@ type LandArgs struct {
 	// Rebase replays a clean checkout's commits in isolation if the folder
 	// branch advanced. It does not rewrite the original checkout.
 	Rebase bool `json:"rebase,omitempty"`
+	// SkipDirty lands the commits although the checkout holds uncommitted
+	// source changes, leaving them there. Changes on the commits' own paths,
+	// which land would merge along, and a replay's are still refused.
+	SkipDirty bool `json:"skip_dirty,omitempty"`
 }
 
 // LandReply reports the files land merged as ApplyReply does, with Branch
 // moved from Old to Commit: the two are equal when the checkout held no commit
-// to land, and Refused leaves the branch at Old. Left counts the paths the
-// checkout changed outside those commits, which stay there for an apply.
+// to land, and Refused leaves the branch at Old. Left counts the uncommitted
+// paths a SkipDirty land left in the checkout, for an apply.
 type LandReply struct {
 	ApplyReply
 	Old          string `json:"old"`

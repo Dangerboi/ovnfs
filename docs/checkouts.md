@@ -397,14 +397,22 @@ with itself, and a file you changed back in the folder stays as you left it.
 checked out in its folder, as committing there would have: the branch
 fast-forwards to the checkout's HEAD, its index follows, and the checkout's
 files for the paths those commits changed merge into the folder, so the
-folder's uncommitted edits stay on top. `git status` there then shows those
-edits, and whatever the checkout itself left uncommitted in the same files,
-which comes along as it is. Edits outside those paths stay in the checkout;
-the count compares them to its current Git HEAD, not its original capture.
-If the folder's branch advanced and the checkout was rebased, paths changed
-by those intervening commits merge against their current committed version.
+folder's uncommitted edits stay on top: `git status` there then shows only
+those. If the folder's branch advanced and the checkout was rebased, paths
+changed by those intervening commits merge against their current committed
+version.
 
-Land refuses before it writes anything: when the folder's HEAD is detached
+Commit everything first: land refuses while the checkout holds uncommitted
+source changes, which `rm` would discard. A version the folder already holds,
+such as an edit the checkout inherited from the folder when it opened, does
+not count, nor does a [pull](#pulling-the-folder-in-pull)'s merge of the
+folder's edits into a path the commits change: land carries that back
+uncommitted. `--skip-dirty` lands the commits anyway and leaves those changes
+in the checkout, for a later commit and land or an `apply`; uncommitted
+changes to a path the commits change are refused even then, since land would
+carry them along. With no commit to land, the refusal points to `apply`.
+
+Land also refuses before it writes anything: when the folder's HEAD is detached
 (`apply --branch NAME` then brings the commits as a branch), when the branch
 holds commits the checkout's are not based on (rebase inside the checkout, as
 the message spells out), when the commits' paths have staged changes, and when

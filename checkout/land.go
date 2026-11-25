@@ -18,12 +18,13 @@ import (
 //
 // Everything that can refuse does so before the folder is written: a detached
 // HEAD there, a branch holding commits the checkout's HEAD lacks, staged
-// changes on the commits' paths, commits that cannot be copied, and files that
-// would conflict (the reply then has Refused set), unless Markers asks for
-// their conflict markers in the folder instead. The branch moves last, once
-// every file is merged; until then, and should moving it still fail, the
-// folder holds the merged files as uncommitted edits and landing again moves
-// it.
+// changes on the commits' paths, uncommitted source changes in the checkout
+// (unless SkipDirty leaves those off the commits' paths behind), commits that
+// cannot be copied, and files that would conflict (the reply then has Refused
+// set), unless Markers asks for their conflict markers in the folder instead.
+// The branch moves last, once every file is merged; until then, and should
+// moving it still fail, the folder holds the merged files as uncommitted edits
+// and landing again moves it.
 func (r *Registry) Land(ctx context.Context, args api.LandArgs) (api.LandReply, error) {
 	resume, err := r.Quiesce(ctx)
 	if err != nil {
@@ -120,10 +121,8 @@ func (r *Registry) Land(ctx context.Context, args api.LandArgs) (api.LandReply, 
 		return api.LandReply{}, refused(err)
 	}
 	reply := api.LandReply{Old: old, ApplyReply: api.ApplyReply{Source: meta.Dir, Applied: []api.Change{}, Merged: []string{}, Conflicts: []api.Conflict{}, Branch: branch, Commit: commit}}
-	if commit == old {
-		if plan.replayed {
-			reply.ReplayedFrom = tip
-		}
+	if commit == old && plan.replayed {
+		reply.ReplayedFrom = tip
 		return reply, nil
 	}
 	plan.changed, plan.paths = changed, make(map[string]bool, len(changed))
@@ -132,6 +131,24 @@ func (r *Registry) Land(ctx context.Context, args api.LandArgs) (api.LandReply, 
 	}
 	if plan.head, err = gitLeaves(ctx, private, tip); err != nil {
 		return api.LandReply{}, coded(err)
+	}
+	landed, left, err := r.uncommitted(h, &plan)
+	if err != nil {
+		return api.LandReply{}, coded(err)
+	}
+	switch {
+	case plan.replayed && len(left) != 0:
+		return api.LandReply{}, failure("conflict", "checkout %s has uncommitted source changes in %s; commit them or rebase manually", name, pathList(left))
+	case len(landed) != 0:
+		return api.LandReply{}, failure("conflict", "checkout %s has uncommitted changes in %s on top of the commits that change it; commit them there, then land again", name, pathList(landed))
+	case len(left) != 0 && !args.SkipDirty && commit == old:
+		return api.LandReply{}, failure("conflict", "checkout %s holds no commit beyond %s, only uncommitted source changes in %s; commit them there, then land, or `ovnfs apply %s` merges them as uncommitted edits", name, branch, pathList(left), name)
+	case len(left) != 0 && !args.SkipDirty:
+		return api.LandReply{}, failure("conflict", "checkout %s has uncommitted source changes in %s; commit them there, then land again, or `ovnfs land %s --skip-dirty` lands only its commits and leaves them in the checkout", name, pathList(left), name)
+	}
+	reply.Left = len(left)
+	if commit == old {
+		return reply, nil
 	}
 	for _, captured := range h.base.view.Repos() {
 		if captured.Path == "" && captured.Head != "" && captured.Head != old && !plan.replayed {
@@ -152,12 +169,12 @@ func (r *Registry) Land(ctx context.Context, args api.LandArgs) (api.LandReply, 
 			return api.LandReply{}, codedTransfer(err)
 		}
 	}
-	files, left, err := r.mergeFiles(ctx, h, mergeOptions{dryRun: args.DryRun, atomic: !args.Markers, land: &plan})
+	files, err := r.mergeFiles(ctx, h, mergeOptions{dryRun: args.DryRun, atomic: !args.Markers, land: &plan})
 	if err != nil {
 		return api.LandReply{}, err
 	}
 	files.Branch, files.Commit = branch, commit
-	reply.ApplyReply, reply.Left = files, left
+	reply.ApplyReply = files
 	if len(files.Conflicts) != 0 {
 		reply.Commit = old
 		return reply, nil

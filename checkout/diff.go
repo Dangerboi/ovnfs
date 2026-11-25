@@ -543,8 +543,7 @@ func (r *Registry) Apply(ctx context.Context, args api.ApplyArgs) (api.ApplyRepl
 	}
 	defer release()
 	if args.Branch == "" {
-		reply, _, err := r.mergeFiles(ctx, h, mergeOptions{dryRun: args.DryRun, atomic: args.Atomic})
-		return reply, err
+		return r.mergeFiles(ctx, h, mergeOptions{dryRun: args.DryRun, atomic: args.Atomic})
 	}
 	if args.Atomic {
 		return api.ApplyReply{}, failure("invalid", "--atomic applies to files; --branch moves commits and writes none")
@@ -608,11 +607,11 @@ type mergeOptions struct {
 
 // mergeFiles merges h into its folder with both merge locks held. For land,
 // Git defines the paths being integrated, not the checkout's open-time diff.
-func (r *Registry) mergeFiles(ctx context.Context, h *checkoutRecord, o mergeOptions) (reply api.ApplyReply, left int, err error) {
+func (r *Registry) mergeFiles(ctx context.Context, h *checkoutRecord, o mergeOptions) (reply api.ApplyReply, err error) {
 	root := h.base.view.Meta().Dir
 	snap, err := r.Snap(ctx, api.SnapArgs{Checkout: h.meta.Name, Label: "apply", Wait: !o.dryRun})
 	if err != nil {
-		return api.ApplyReply{}, 0, err
+		return api.ApplyReply{}, err
 	}
 	// The snapshot outlives only a merge that left something in the folder to
 	// come back to: an error, or conflicts that were written.
@@ -629,29 +628,29 @@ func (r *Registry) mergeFiles(ctx context.Context, h *checkoutRecord, o mergeOpt
 		s := r.snapshots[id]
 		r.mu.RUnlock()
 		if s == nil {
-			return api.ApplyReply{}, 0, failure("not_found", "no snapshot %s", id)
+			return api.ApplyReply{}, failure("not_found", "no snapshot %s", id)
 		}
 		if snap, err = r.waitHashed(ctx, s); err != nil {
-			return api.ApplyReply{}, 0, err
+			return api.ApplyReply{}, err
 		}
 	}
 	// Unix would fail each path with ENOTDIR, but Windows reports them absent,
 	// which would turn every path into a deletion conflict.
 	if info, err := os.Stat(root); err == nil && !info.IsDir() {
-		return api.ApplyReply{}, 0, failure("invalid", "source %s is not a directory", root)
+		return api.ApplyReply{}, failure("invalid", "source %s is not a directory", root)
 	}
 	st := h.base.view.Store()
 	from, err := st.Flatten(h.base.view.Meta().Tree)
 	if err != nil {
-		return api.ApplyReply{}, 0, coded(err)
+		return api.ApplyReply{}, coded(err)
 	}
 	to, err := st.Flatten(store.OID(snap.Snapshot.Tree))
 	if err != nil {
-		return api.ApplyReply{}, 0, coded(err)
+		return api.ApplyReply{}, coded(err)
 	}
 	bases, err := r.folderBases(h)
 	if err != nil {
-		return api.ApplyReply{}, 0, coded(err)
+		return api.ApplyReply{}, coded(err)
 	}
 	bases.over(from, true)
 	baseRead, theirRead := h.base.view.Content, h.base.view.Content
@@ -659,9 +658,9 @@ func (r *Registry) mergeFiles(ctx context.Context, h *checkoutRecord, o mergeOpt
 	if o.land == nil {
 		changes = compare(from, to)
 	} else {
-		changes, left, err = o.land.plan(h, from, to, bases)
+		changes, err = o.land.plan(h, from, to, bases)
 		if err != nil {
-			return api.ApplyReply{}, 0, coded(err)
+			return api.ApplyReply{}, coded(err)
 		}
 		baseRead, theirRead = o.land.readBase, o.land.readTheirs
 	}
@@ -707,25 +706,25 @@ func (r *Registry) mergeFiles(ctx context.Context, h *checkoutRecord, o mergeOpt
 		probe, err := pass(true, bases.clone())
 		if err != nil || len(probe.Conflicts) != 0 {
 			probe.Refused, probe.Pullable = err == nil, err == nil && pullable
-			return probe, left, err
+			return probe, err
 		}
 	}
 	if reply, err = pass(o.dryRun, bases); err != nil {
-		return api.ApplyReply{}, 0, err
+		return api.ApplyReply{}, err
 	}
 	reply.Pullable = pullable && len(reply.Conflicts) != 0
 	if o.dryRun {
 		reply.Refused = o.atomic && len(reply.Conflicts) != 0
-		return reply, left, nil
+		return reply, nil
 	}
 	if o.land != nil && o.land.replayed {
-		return reply, left, nil // the original checkout was not replayed
+		return reply, nil // the original checkout was not replayed
 	}
 	read := func(p string, f store.File) ([]byte, error) { return h.base.view.Blob(p, f.ID) }
 	if err := r.setFolderBases(h, bases, read); err != nil {
-		return api.ApplyReply{}, 0, coded(err)
+		return api.ApplyReply{}, coded(err)
 	}
-	return reply, left, nil
+	return reply, nil
 }
 
 // holdsPullMarkers reports whether theirs, the checkout's version of p, still

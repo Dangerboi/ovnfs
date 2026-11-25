@@ -1,6 +1,6 @@
 ---
 name: ovnfs
-description: Isolated copy-on-write checkouts of any folder or git repository with the ovnfs CLI. Use when you need a second copy of a folder, for example a risky experiment, another branch or commit, checking a patch against a clean HEAD, reviewing a PR beside the user's work, or one workspace per parallel agent. Use it instead of `git worktree add`, `git clone` or `cp -r`. Covers `ovnfs new`, `run`, `diff`, `apply`, `snap`, `fork`, `rm`, daemon-side `grep`/`glob`, and path classes and rules.
+description: Isolated copy-on-write checkouts of any folder or git repository with the ovnfs CLI. Use when you need a second copy of a folder, for example a risky experiment, another branch or commit, checking a patch against a clean HEAD, reviewing a PR beside the user's work, or one workspace per parallel agent. Use it instead of `git worktree add`, `git clone` or `cp -r`. Covers `ovnfs new`, `run`, `diff`, `land`, `apply`, `pull`, `snap`, `fork`, `rm`, daemon-side `grep`/`glob`, and path classes and rules.
 ---
 
 # ovnfs
@@ -8,10 +8,11 @@ description: Isolated copy-on-write checkouts of any folder or git repository wi
 An ovnfs checkout is a copy-on-write view of a folder, served from one mount
 (`~/checkouts/<name>` on macOS and Linux, drive `O:` on Windows). Opening one
 takes about a second at any size and copies nothing. Writes stay in the
-checkout, and the folder is written only when you `apply`. In a git repository
-the checkout gets a private git directory, so commits made inside it stay
-there. In a jj repository it is also a jj workspace of that repository, named
-after the checkout: use `jj` inside it directly, never `jj git init`.
+checkout, and the folder is written only when you `land` or `apply`. In a git
+repository the checkout gets a private git directory, so commits made inside
+it stay there until you `land` them. In a jj repository it is also a jj
+workspace of that repository, named after the checkout: use `jj` inside it
+directly, never `jj git init`.
 
 When you need a second copy of a folder, open an ovnfs checkout instead of
 `git worktree add`, `git clone` or `cp -r`, unless the user asks for one of
@@ -22,10 +23,9 @@ those.
 ```sh
 cd ~/src/app
 cd "$(ovnfs new --name fix-auth)"   # stdout is only the path; the summary goes to stderr
-# ...edit, build, test, commit freely...
+# ...edit, build, test, then commit everything there...
 ovnfs diff fix-auth -p              # source changes since the checkout opened
-ovnfs apply fix-auth --dry-run      # preview the merge into ~/src/app
-ovnfs apply fix-auth                # merge the changes into ~/src/app as uncommitted edits
+ovnfs land fix-auth                 # put the commits on ~/src/app's branch, files included
 ovnfs rm fix-auth                   # remove the checkout and unused snapshots
 ```
 
@@ -79,6 +79,30 @@ command fails or is interrupted.
 
 ## Bringing work back
 
+Commit in the checkout, then `land`. Use `apply` only when the user wants
+uncommitted edits instead of commits.
+
+- `ovnfs land NAME` puts the checkout's commits on the branch checked out in
+  the folder, as committing there would have: the branch fast-forwards, its
+  index follows, and the commits' files merge in with the folder's
+  uncommitted edits kept on top.
+- Land refuses while the checkout holds uncommitted source changes, which
+  `rm` would discard: commit them and land again. `--skip-dirty` lands the
+  commits and leaves those changes in the checkout; uncommitted changes to a
+  path the commits change are refused even then.
+- The folder's branch moved since the checkout opened? Land refuses;
+  `ovnfs land NAME --rebase` replays a clean checkout's commits onto it
+  without rewriting the checkout. If the replay conflicts, rebase inside the
+  checkout as the message spells out, then land again.
+- A commit's file conflicting with the folder's uncommitted edits refuses the
+  land, writing nothing. `ovnfs land NAME --markers` writes the conflict
+  markers into the folder, or `ovnfs pull NAME` into the checkout. Resolve
+  them, then land again. Never commit a pulled resolution: it holds the
+  user's uncommitted edits, which land carries back uncommitted.
+- A detached HEAD in the folder refuses; `ovnfs apply NAME --branch B` brings
+  the commits as branch `B` instead.
+- `rm` refuses a checkout holding commits no branch of the folder reaches.
+  Land them first; `rm --force` discards them.
 - `ovnfs apply NAME` temporarily snapshots the checkout, then three-way merges
   each changed source path into the folder against the checkout's base. Commits are
   flattened: their changes land as uncommitted edits, and new files arrive
@@ -91,6 +115,10 @@ command fails or is interrupted.
   changes on both sides, is reported and the file is left untouched.
 - Applying twice is a no-op, so you can keep working in the checkout and apply
   again later.
+- `ovnfs pull NAME` is apply in reverse: it merges the folder's newer files
+  into the checkout, so a conflict `apply` reports gets its markers
+  there instead of in the user's files. Resolve them in the checkout, then
+  apply. It refuses checkouts opened with `--rev` or `--take`.
 - `ovnfs apply NAME --branch B` turns the checkout's **commits** (not its
   uncommitted edits) into branch `B` in the folder's repository; the folder's
   files stay untouched. If `B` is checked out in the folder, apply
