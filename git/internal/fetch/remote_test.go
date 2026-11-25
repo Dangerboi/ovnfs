@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/cgi"
@@ -87,36 +88,90 @@ func (s *server) fetchScenario(t *testing.T, url string, tweak func(*Options)) {
 	}
 }
 
-func freePort(t *testing.T) string {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
-	return fmt.Sprint(l.Addr().(*net.TCPAddr).Port)
-}
-
 // startDaemon serves the parent directory of s.dir with git daemon and
 // returns the git:// URL of the repository.
 func (s *server) startDaemon(t *testing.T) string {
 	root := filepath.Dir(s.dir)
-	port := freePort(t)
-	cmd := exec.Command("git", "daemon", "--reuseaddr", "--export-all", "--base-path="+root,
-		"--listen=127.0.0.1", "--port="+port, root)
-	cmd.Env = s.g.environ()
-	if err := cmd.Start(); err != nil {
-		t.Skipf("git daemon: %v", err)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
-	for range 100 {
-		if c, err := net.Dial("tcp", "127.0.0.1:"+port); err == nil {
-			c.Close()
-			return "git://127.0.0.1:" + port + "/" + filepath.Base(s.dir)
+	var (
+		mu     sync.Mutex
+		conns  = map[net.Conn]bool{}
+		closed bool
+		wg     sync.WaitGroup
+	)
+	t.Cleanup(func() {
+		l.Close()
+		mu.Lock()
+		closed = true
+		for conn := range conns {
+			conn.Close()
 		}
-		time.Sleep(50 * time.Millisecond)
+		mu.Unlock()
+		wg.Wait()
+	})
+	env := s.g.environ()
+	wg.Go(func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			if closed {
+				mu.Unlock()
+				conn.Close()
+				return
+			}
+			conns[conn] = true
+			mu.Unlock()
+			wg.Go(func() {
+				defer func() {
+					mu.Lock()
+					delete(conns, conn)
+					mu.Unlock()
+					conn.Close()
+				}()
+				if err := serveInetd(conn, root, env, &wg); err != nil {
+					t.Errorf("git daemon --inetd: %v", err)
+				}
+			})
+		}
+	})
+	return "git://" + l.Addr().String() + "/" + filepath.Base(s.dir)
+}
+
+// serveInetd answers one git:// connection with `git daemon --inetd`, which
+// reads the request from its stdin and exits with the connection. The test
+// owns the listener instead of a listening git daemon: that daemon is a child
+// of the git wrapper, which a kill of the wrapper (or the test's own death)
+// would leave running.
+func serveInetd(conn net.Conn, root string, env []string, wg *sync.WaitGroup) error {
+	cmd := exec.Command("git", "daemon", "--inetd", "--log-destination=none", "--export-all", "--base-path="+root, root)
+	cmd.Env = env
+	cmd.Stdout = conn
+	// Bounds the wait for the stdout copy should a child outlive git.
+	cmd.WaitDelay = 5 * time.Second
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
 	}
-	t.Fatal("git daemon did not start")
-	return ""
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Ends when the caller closes conn after Wait.
+	wg.Go(func() {
+		io.Copy(stdin, conn)
+		stdin.Close()
+	})
+	err = cmd.Wait()
+	if _, ok := errors.AsType[*exec.ExitError](err); ok {
+		// A refused request exits nonzero after telling the client why.
+		return nil
+	}
+	return err
 }
 
 func TestFetchGitDaemon(t *testing.T) {
