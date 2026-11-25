@@ -38,7 +38,7 @@ func (r *Registry) discard(path, label string) error {
 	default:
 	}
 	if waiting, _ := os.ReadDir(dir); len(waiting) > trashBacklog && r.relieving.CompareAndSwap(false, true) {
-		go r.relieveTrash(dir, waiting[trashBacklog:])
+		r.trash.Go(func() { r.relieveTrash(dir, waiting[trashBacklog:]) })
 	}
 	return nil
 }

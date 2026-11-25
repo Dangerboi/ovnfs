@@ -456,10 +456,10 @@ func (r *Registry) newCheckoutRevision(ctx context.Context, name string, args ap
 		return api.NewReply{}, failure("invalid", "checkout %s has a remote source; run new --rev on the original machine, or use `ovnfs fork %s` to copy the current checkout", name, name)
 	}
 	if len(args.Take) != 0 || len(args.Rules) != 0 {
-		return api.NewReply{}, failure("invalid", "cannot combine checkout-local --rev with --take or --rule; use the original folder %q for overrides", root)
+		return api.NewReply{}, failure("invalid", "cannot combine checkout-local --rev with --take or --rule; use the original folder %s for overrides", root)
 	}
 	if _, inMount, holds := r.mountOverlap(root); inMount || holds {
-		return api.NewReply{}, failure("invalid", "checkout %s's source folder %q now overlaps the checkout mount; restore the original source folder or use `ovnfs fork %s`", name, root, name)
+		return api.NewReply{}, failure("invalid", "checkout %s's source folder %s now overlaps the checkout mount; restore the original source folder or use `ovnfs fork %s`", name, root, name)
 	}
 	h.freeze.RLock()
 	defer h.freeze.RUnlock()
@@ -473,7 +473,7 @@ func (r *Registry) newCheckoutRevision(ctx context.Context, name string, args ap
 		return api.NewReply{}, failure("invalid", "checkout %s has no private Git repository; omit --rev to fork it", name)
 	}
 	if !git.IsRoot(root) {
-		return api.NewReply{}, failure("invalid", "checkout %s's source folder %q no longer has its Git repository; restore it or use `ovnfs fork %s`", name, root, name)
+		return api.NewReply{}, failure("invalid", "checkout %s's source folder %s no longer has its Git repository; restore it or use `ovnfs fork %s`", name, root, name)
 	}
 	revision, err := h.base.view.CheckoutRevision(r.gitdirPath(h.meta.dir()), args.Rev)
 	if err != nil {

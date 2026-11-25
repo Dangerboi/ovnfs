@@ -27,7 +27,7 @@ import (
 // the entries' identities.
 type testFS struct {
 	billy.Filesystem
-	root  string
+	root string
 	// cacheable is Backend.Cacheable; nil admits nothing.
 	cacheable func(p string) bool
 

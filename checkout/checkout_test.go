@@ -77,7 +77,11 @@ func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	f := &fixture{t: t, state: filepath.Join(t.TempDir(), "state"), mount: filepath.Join(t.TempDir(), "mount")}
 	f.open()
-	t.Cleanup(func() { f.reg.Close() })
+	// Tests may swap in a registry of their own.
+	t.Cleanup(func() {
+		f.reg.Close()
+		f.reg.trash.Wait()
+	})
 	return f
 }
 
@@ -99,6 +103,12 @@ func (f *fixture) open() {
 		f.t.Fatal(err)
 	}
 	f.reg = reg
+	// Windows cannot delete the state directory while the reaper holds
+	// files below its trash open.
+	f.t.Cleanup(func() {
+		reg.Close()
+		reg.trash.Wait()
+	})
 }
 
 // isolateGit keeps the developer's git configuration, such as merge.conflictStyle,

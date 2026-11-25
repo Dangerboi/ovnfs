@@ -227,7 +227,7 @@ func Open(c Config) (*Registry, error) {
 	r.workers.Add(3)
 	go r.collectGarbage()
 	go r.processNotices()
-	go r.emptyTrash()
+	r.trash.Go(r.emptyTrash)
 	go r.coolCheckouts()
 	// Without folder events, captures are not reused and every checkout takes
 	// its own cache snapshot (see useCaches).
