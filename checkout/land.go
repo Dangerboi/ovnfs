@@ -120,7 +120,7 @@ func (r *Registry) Land(ctx context.Context, args api.LandArgs) (api.LandReply, 
 	if err != nil {
 		return api.LandReply{}, refused(err)
 	}
-	reply := api.LandReply{Old: old, ApplyReply: api.ApplyReply{Source: meta.Dir, Applied: []api.Change{}, Merged: []string{}, Conflicts: []api.Conflict{}, Branch: branch, Commit: commit}}
+	reply := api.LandReply{Old: old, Source: meta.Dir, Applied: []api.Change{}, Merged: []string{}, Conflicts: []api.Conflict{}, Branch: branch, Commit: commit}
 	if commit == old && plan.replayed {
 		reply.ReplayedFrom = tip
 		return reply, nil

@@ -79,12 +79,10 @@ func TestSMBWriteCacheGrantPolicyAndConcurrentOpens(t *testing.T) {
 		g := &f.c.srv.st.opens
 		var wg sync.WaitGroup
 		for i := range 32 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				o := &open{path: "same", tree: f.tree}
 				g.grantCaching(f.c, o, leaseStateArgs(52, byte(i+1), 7, 0))
-			}()
+			})
 		}
 		wg.Wait()
 		g.mu.Lock()
@@ -422,9 +420,7 @@ func TestSMBWriteCacheSharedLeaseConcurrentSeekWrites(t *testing.T) {
 	f.c.maxWrite = 1 << 20
 	var wg sync.WaitGroup
 	for index, o := range opens {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range 128 {
 				data := bytes.Repeat([]byte{byte(index + 1)}, 64)
 				if _, st := handleWrite(cacheWriteRequest(f, o, uint64((i*2+index)*64), data)); st != statusSuccess {
@@ -432,7 +428,7 @@ func TestSMBWriteCacheSharedLeaseConcurrentSeekWrites(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	data := make([]byte, 128*128)

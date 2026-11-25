@@ -47,8 +47,7 @@ func modelClass(err error) string {
 	if err == nil {
 		return clOK
 	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
+	if errno, ok := errors.AsType[syscall.Errno](err); ok {
 		switch errno {
 		case syscall.ENOENT:
 			return clNoent

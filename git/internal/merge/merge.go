@@ -128,18 +128,16 @@ func (m *merger) plan() {
 		switch {
 		case j == len(ht) || (i < len(ho) && ho[i].A+ho[i].NA < ht[j].A):
 			h := ho[i]
-			m.items = append(m.items, item{act: keepOurs, region: region{
+			m.items = append(m.items, item{act: keepOurs,
 				O0: h.B, O1: h.B + h.NB, B0: h.A, B1: h.A + h.NA,
-				T0: h.A + dT, T1: h.A + h.NA + dT,
-			}})
+				T0: h.A + dT, T1: h.A + h.NA + dT})
 			dO += h.NB - h.NA
 			i++
 		case i == len(ho) || ht[j].A+ht[j].NA < ho[i].A:
 			h := ht[j]
-			m.items = append(m.items, item{act: takeTheirs, region: region{
+			m.items = append(m.items, item{act: takeTheirs,
 				O0: h.A + dO, O1: h.A + h.NA + dO, B0: h.A, B1: h.A + h.NA,
-				T0: h.B, T1: h.B + h.NB,
-			}})
+				T0: h.B, T1: h.B + h.NB})
 			dT += h.NB - h.NA
 			j++
 		default:
@@ -211,10 +209,9 @@ func (m *merger) addConflict(r region) {
 		}
 		// Narrowed conflicts carry no base range: StyleMerge never writes it.
 		for _, h := range hs {
-			m.items = append(m.items, item{act: conflict, region: region{
+			m.items = append(m.items, item{act: conflict,
 				O0: r.O0 + h.A, O1: r.O0 + h.A + h.NA,
-				T0: r.T0 + h.B, T1: r.T0 + h.B + h.NB,
-			}})
+				T0: r.T0 + h.B, T1: r.T0 + h.B + h.NB})
 		}
 	}
 }

@@ -345,8 +345,8 @@ func openPacks(dir string) (*packSet, error) {
 	// The newest intact merged index stands; older ones, and the indexes of
 	// packs it covers, are leftovers of an interrupted merge.
 	slices.Sort(gens)
-	for i := len(gens) - 1; i >= 0; i-- {
-		path := p.midxPath(gens[i])
+	for _, gen := range slices.Backward(gens) {
+		path := p.midxPath(gen)
 		if p.merged == nil {
 			x, err := openIndex(path, func(n uint32) (int64, bool) { size, ok := sizes[n]; return size, ok })
 			if err == nil {

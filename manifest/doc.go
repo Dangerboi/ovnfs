@@ -199,9 +199,9 @@ func (d *Doc) Unset(key string) (found bool, err error) {
 	if len(at) < len(k.path) {
 		return false, nil
 	}
-	for i := len(maps) - 1; i >= 0; i-- {
-		maps[i].Content = slices.Delete(maps[i].Content, at[i]-1, at[i]+1)
-		if len(maps[i].Content) > 0 {
+	for i, m := range slices.Backward(maps) {
+		m.Content = slices.Delete(m.Content, at[i]-1, at[i]+1)
+		if len(m.Content) > 0 {
 			break
 		}
 	}

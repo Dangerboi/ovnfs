@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -33,9 +34,7 @@ func TestQueriesMatchGit(t *testing.T) {
 	appendFile(t, r.gitDir+"/config", b.String())
 	env := o.with(map[string]string{"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "Multi.Sub.Sect.key", "GIT_CONFIG_VALUE_0": "from-env"})
 	gitEnv := o.with(map[string]string{"GIT_DIR": r.gitDir})
-	for k, v := range env {
-		gitEnv[k] = v
-	}
+	maps.Copy(gitEnv, env)
 	cfg, err := Load(Options{GitDir: r.gitDir, CommonDir: r.gitDir, LookupEnv: lookup(env)})
 	if err != nil {
 		t.Fatal(err)

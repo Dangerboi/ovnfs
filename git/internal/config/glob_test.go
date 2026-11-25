@@ -1,6 +1,7 @@
 package config
 
 import (
+	"maps"
 	"testing"
 )
 
@@ -24,9 +25,7 @@ func TestGlobMatchesGit(t *testing.T) {
 		for _, pattern := range patterns {
 			env := o.with(map[string]string{"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "includeIf.onbranch:" + pattern + ".path", "GIT_CONFIG_VALUE_0": marker})
 			gitEnv := o.with(map[string]string{"GIT_DIR": r.gitDir})
-			for k, v := range env {
-				gitEnv[k] = v
-			}
+			maps.Copy(gitEnv, env)
 			res := o.git(r.top, gitEnv, "config", "--get", "t.m")
 			cfg, err := Load(Options{GitDir: r.gitDir, CommonDir: r.gitDir, LookupEnv: lookup(env), Branch: branchOf(r.gitDir)})
 			if err != nil {

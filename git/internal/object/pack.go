@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -257,17 +258,17 @@ walk:
 			break walk
 		}
 	}
-	for i := len(chain) - 1; i >= 0; i-- {
-		delta, err := p.inflateAt(chain[i])
+	for i, c := range slices.Backward(chain) {
+		delta, err := p.inflateAt(c)
 		if err != nil {
 			return 0, nil, err
 		}
 		if data, err = applyDelta(data, delta); err != nil {
-			return 0, nil, fmt.Errorf("pack %s: entry at %d: %w", p.path, chain[i].off, err)
+			return 0, nil, fmt.Errorf("pack %s: entry at %d: %w", p.path, c.off, err)
 		}
 		shared = false
 		if i > 0 {
-			deltaBases.put(baseKey{p, chain[i].off}, kind, data)
+			deltaBases.put(baseKey{p, c.off}, kind, data)
 			shared = true
 		}
 	}

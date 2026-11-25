@@ -227,7 +227,7 @@ func TestStatCacheConcurrentSave(t *testing.T) {
 	want := make([]statCache, writers)
 	errc := make(chan error, writers)
 	var wg sync.WaitGroup
-	for i := 0; i < writers; i++ {
+	for i := range writers {
 		entries := map[string]statEntry{
 			"a.txt": {Size: int64(i + 1), Mtime: old, Ctime: old, Ino: uint64(i + 1), Mode: store.ModeFile, OID: files["a.txt"].ID},
 		}

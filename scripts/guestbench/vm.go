@@ -453,12 +453,12 @@ func (v *vm) read(r io.Reader, decode func(string)) {
 // lines share the console, so the prefix may follow other output; a line
 // whose JSON does not decode is logged and skipped.
 func (v *vm) decode(line string) {
-	i := strings.Index(line, wire.Prefix)
-	if i < 0 {
+	_, after, ok := strings.Cut(line, wire.Prefix)
+	if !ok {
 		return
 	}
 	var ev wire.Event
-	if err := json.Unmarshal([]byte(line[i+len(wire.Prefix):]), &ev); err != nil {
+	if err := json.Unmarshal([]byte(after), &ev); err != nil {
 		fmt.Fprintf(os.Stderr, "guestbench: skipping undecodable event line %q: %v\n", line, err)
 		return
 	}

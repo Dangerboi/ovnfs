@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -621,8 +622,8 @@ func (f *attrFill) apply(rules []attrRule, parts []string, dir bool) {
 		if !rules[n].pattern.matches(parts, dir) {
 			continue
 		}
-		for s := len(rules[n].states) - 1; s >= 0; s-- {
-			f.decide(rules[n].states[s])
+		for _, v := range slices.Backward(rules[n].states) {
+			f.decide(v)
 		}
 	}
 }
@@ -641,7 +642,7 @@ func (f *attrFill) decide(state attrState) {
 		return
 	}
 	members := f.macros[state.name]
-	for n := len(members) - 1; n >= 0; n-- {
-		f.decide(members[n])
+	for _, member := range slices.Backward(members) {
+		f.decide(member)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	maps0 "maps"
 	"math/rand/v2"
 	"os"
 	"path"
@@ -1344,9 +1345,7 @@ func concurrentLevels(streams int) []map[string]lowerEntry {
 			g + "/e": dirE(), g + "/e/o": fileE("o", 0o644), g + "/s": linkE(g + "-a"), "shared/" + g + "-l": linkE(g + "-d"),
 			"shared/" + g + "-a": fileE("shared a", 0o644), "shared/" + g + "-d": dirE(), "shared/" + g + "-d/f": fileE("f", 0o644),
 		}
-		for p, e := range maps {
-			bottom[p] = e
-		}
+		maps0.Copy(bottom, maps)
 		layer := map[string]lowerEntry{
 			g: dirE(), g + "/b": whE(), g + "/d": dirE(), g + "/d/n": fileE("n", 0o644),
 			g + "/e": opqE(), g + "/e/z": fileE("z", 0o644),
@@ -1356,9 +1355,7 @@ func concurrentLevels(streams int) []map[string]lowerEntry {
 		if k%2 == 0 {
 			layer["shared/"+g+"-a"] = whE()
 		}
-		for p, e := range layer {
-			low[p] = e
-		}
+		maps0.Copy(low, layer)
 	}
 	return []map[string]lowerEntry{bottom, low}
 }

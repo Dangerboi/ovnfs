@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -765,9 +766,9 @@ func (l *Layer) prune() bool {
 	// Children follow their parents in walk order. A directory holding a raw
 	// entry is not even tried: macOS rmdir(2) also removes a directory that
 	// holds only AppleDouble "._" files, deleting them with it.
-	for i := len(dirs) - 1; i >= 0; i-- {
-		if !held[dirs[i]] {
-			_ = os.Remove(filepath.Join(l.dir, filepath.FromSlash(dirs[i])))
+	for _, dir := range slices.Backward(dirs) {
+		if !held[dir] {
+			_ = os.Remove(filepath.Join(l.dir, filepath.FromSlash(dir)))
 		}
 	}
 	return held[""]

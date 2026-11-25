@@ -319,9 +319,7 @@ func (f *reuseFolder) keepsPoolLocked(b *baseRecord, gitGen uint64, hash string)
 // template's. r.mu is held.
 func (r *Registry) templateLater(f *reuseFolder, b *baseRecord) {
 	r.retainLocked(b, nil)
-	r.workers.Add(1)
-	go func() {
-		defer r.workers.Done()
+	r.workers.Go(func() {
 		template, err := r.writeTemplate(b)
 		r.mu.Lock()
 		defer r.mu.Unlock()
@@ -335,7 +333,7 @@ func (r *Registry) templateLater(f *reuseFolder, b *baseRecord) {
 			f.template = template
 			r.fillPoolLocked(f)
 		}
-	}()
+	})
 }
 
 // poolTarget is how many checkouts f keeps prepared: poolSize, as far as their git
@@ -630,11 +628,9 @@ func (r *Registry) discardLater(pool []*checkoutRecord) {
 	if len(pool) == 0 {
 		return
 	}
-	r.workers.Add(1)
-	go func() {
-		defer r.workers.Done()
+	r.workers.Go(func() {
 		r.discardPrepared(pool)
-	}()
+	})
 }
 
 // setWarmLocked makes b, captured with the manifest lock hash from generations gen

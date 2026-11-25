@@ -69,7 +69,7 @@ func TestMarkCheckout(t *testing.T) {
 				}
 				withoutMarker := func(list string) []string {
 					var rest []string
-					for _, line := range strings.Split(list, "\n") {
+					for line := range strings.SplitSeq(list, "\n") {
 						if !strings.HasPrefix(line, "ovnfs.checkout=") {
 							rest = append(rest, line)
 						}
@@ -214,7 +214,7 @@ func TestMakeGitdirConfig(t *testing.T) {
 		t.Fatalf("git config --list: %v\n%s", err, out)
 	}
 	got := map[string][]string{}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
 		key, value, _ := strings.Cut(line, "=")
 		got[key] = append(got[key], value)
 	}

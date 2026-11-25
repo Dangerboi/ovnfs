@@ -373,8 +373,7 @@ func parseHTTPURL(raw, scheme string) (*endpoint, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		// url.Error would quote the URL, credentials included.
-		var ue *url.Error
-		if errors.As(err, &ue) {
+		if ue, ok := errors.AsType[*url.Error](err); ok {
 			err = ue.Err
 		}
 		return nil, fmt.Errorf("fetch: invalid URL %q: %w", redactURL(raw), err)
@@ -406,8 +405,8 @@ func redactURL(raw string) string {
 		}
 		return raw
 	}
-	if colon := strings.IndexByte(raw, ':'); colon >= 0 {
-		if at := strings.IndexByte(raw[:colon], '@'); at >= 0 {
+	if before, _, ok := strings.Cut(raw, ":"); ok {
+		if at := strings.IndexByte(before, '@'); at >= 0 {
 			return "***" + raw[at:]
 		}
 	}

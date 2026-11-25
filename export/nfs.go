@@ -25,8 +25,8 @@ type nfsFS struct {
 func (e *Export) NFS() nfs.Backend {
 	rt := &Router{routerState: e.rt.routerState}
 	return &nfsFS{
-		protocolFS: protocolFS{nodeFS: &nodeFS{Filesystem: rt, Change: rt, rt: rt}, volume: e.volume},
-		handles:    e.handles,
+		nodeFS: &nodeFS{Filesystem: rt, Change: rt, rt: rt}, volume: e.volume,
+		handles: e.handles,
 	}
 }
 

@@ -151,7 +151,7 @@ func TestQuiesceObserversSeePendingWrites(t *testing.T) {
 			}
 		},
 		"prune": func(t *testing.T, f *fixture) {
-			r, err := f.reg.Prune(t.Context(), api.PruneArgs{Select: api.Select{NoDiff: true}})
+			r, err := f.reg.Prune(t.Context(), api.PruneArgs{NoDiff: true})
 			if err != nil || len(r.Removed) != 0 {
 				t.Fatalf("prune discarded dirty pending data: %+v, %v", r, err)
 			}
@@ -278,7 +278,7 @@ func TestQuiesceFailurePrecedesEveryOperation(t *testing.T) {
 		"plan": func(ctx context.Context) error { _, e := f.reg.Plan(ctx, api.PlanArgs{Checkout: "app"}); return e },
 		"ls":   func(ctx context.Context) error { _, e := f.reg.Ls(ctx, api.LsArgs{}); return e },
 		"prune": func(ctx context.Context) error {
-			_, e := f.reg.Prune(ctx, api.PruneArgs{Select: api.Select{NoDiff: true}})
+			_, e := f.reg.Prune(ctx, api.PruneArgs{NoDiff: true})
 			return e
 		},
 		"rm":     func(ctx context.Context) error { return f.reg.Rm(ctx, api.RmArgs{Checkout: "app"}) },

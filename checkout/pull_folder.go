@@ -105,7 +105,7 @@ func (r *Registry) pullFolder(ctx context.Context, h *checkoutRecord, args api.P
 		return api.PullReply{}, nil, failure("io", "registry is closed")
 	}
 	root := h.base.view.Meta().Dir
-	reply = api.PullReply{Folder: root, ApplyReply: api.ApplyReply{Source: filepath.Join(r.config.Mount, args.Checkout), Applied: []api.Change{}, Merged: []string{}, Conflicts: []api.Conflict{}}}
+	reply = api.PullReply{Folder: root, Source: filepath.Join(r.config.Mount, args.Checkout), Applied: []api.Change{}, Merged: []string{}, Conflicts: []api.Conflict{}}
 	s := sides{ours: "in the checkout", theirs: "in the source folder",
 		labels: git.Labels{Ours: "checkout " + h.meta.Name, Base: "base", Theirs: "folder"}}
 	// held is the folder as the checkout last took it, which tells the paths

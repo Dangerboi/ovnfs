@@ -145,7 +145,7 @@ func (r *Registry) mergePull(ctx context.Context, h *checkoutRecord, args api.Pu
 	if h.base.view.Meta().Remote != nil {
 		return api.PullReply{}, nil, failure("invalid", "pull needs the local checkout that was attached to another machine")
 	}
-	reply = api.PullReply{Snapshot: pulled.Snapshot, ApplyReply: api.ApplyReply{Source: filepath.Join(r.config.Mount, args.Checkout), Applied: []api.Change{}, Merged: []string{}, Conflicts: []api.Conflict{}}}
+	reply = api.PullReply{Snapshot: pulled.Snapshot, Source: filepath.Join(r.config.Mount, args.Checkout), Applied: []api.Change{}, Merged: []string{}, Conflicts: []api.Conflict{}}
 	s := sides{ours: "in the local checkout", theirs: "remotely",
 		labels: git.Labels{Ours: "local", Base: "base", Theirs: strings.TrimSpace("remote " + pulled.Snapshot.Checkout)}}
 	// The remote reports only paths it changed since the attached tree; of

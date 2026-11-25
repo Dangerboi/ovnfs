@@ -73,7 +73,7 @@ func TestSelect(t *testing.T) {
 			t.Errorf("%s: picked %v, want %v", tt.name, got, tt.want)
 		}
 	}
-	if _, err := f.reg.Ls(context.Background(), api.LsArgs{Select: api.Select{Dir: filepath.Join(f.mount, "gone")}}); !isCode(err, "not_found") {
+	if _, err := f.reg.Ls(context.Background(), api.LsArgs{Dir: filepath.Join(f.mount, "gone")}); !isCode(err, "not_found") {
 		t.Errorf("folder of a missing checkout in the mount: %v", err)
 	}
 }
@@ -86,7 +86,7 @@ func TestPrune(t *testing.T) {
 	if _, err := f.reg.Prune(ctx, api.PruneArgs{}); !isCode(err, "invalid") {
 		t.Fatalf("prune without criteria: %v", err)
 	}
-	dry, err := f.reg.Prune(ctx, api.PruneArgs{Select: api.Select{NoDiff: true}, DryRun: true})
+	dry, err := f.reg.Prune(ctx, api.PruneArgs{NoDiff: true, DryRun: true})
 	if err != nil || len(dry.Removed) != 2 || len(f.ls().Checkouts) != 3 {
 		t.Fatalf("dry run = %+v, %v; %d checkouts left", dry, err, len(f.ls().Checkouts))
 	}
@@ -100,7 +100,7 @@ func TestPrune(t *testing.T) {
 	if removed, err := f.reg.remove(ctx, picked.Name, picked.Touched, false); removed || err != nil {
 		t.Fatalf("removing %s touched after it was picked = %v, %v", picked.Name, removed, err)
 	}
-	reply, err := f.reg.Prune(ctx, api.PruneArgs{Select: api.Select{Dir: app}})
+	reply, err := f.reg.Prune(ctx, api.PruneArgs{Dir: app})
 	if err != nil || len(reply.Removed) != 2 {
 		t.Fatalf("prune %s = %+v, %v", app, reply, err)
 	}
@@ -128,7 +128,7 @@ func TestRemovalSnapshots(t *testing.T) {
 				layer := f.reg.snapshots[snap.Snapshot.ID].layer
 				f.reg.mu.RUnlock()
 				if prune {
-					_, err = f.reg.Prune(ctx, api.PruneArgs{Select: api.Select{Dir: dir}, StickySnapshots: sticky})
+					_, err = f.reg.Prune(ctx, api.PruneArgs{Dir: dir, StickySnapshots: sticky})
 				} else {
 					err = f.reg.Rm(ctx, api.RmArgs{Checkout: "app", StickySnapshots: sticky})
 				}
@@ -236,7 +236,7 @@ func TestRemovalKeepsEarlierCheckoutSnapshots(t *testing.T) {
 					}
 				}
 				f.open()
-				selected, err := f.reg.Ls(ctx, api.LsArgs{Select: api.Select{Dir: dir}})
+				selected, err := f.reg.Ls(ctx, api.LsArgs{Dir: dir})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -249,7 +249,7 @@ func TestRemovalKeepsEarlierCheckoutSnapshots(t *testing.T) {
 				}
 
 				if prune {
-					_, err = f.reg.Prune(ctx, api.PruneArgs{Select: api.Select{Dir: dir}})
+					_, err = f.reg.Prune(ctx, api.PruneArgs{Dir: dir})
 				} else {
 					err = f.reg.Rm(ctx, api.RmArgs{Checkout: "probe"})
 				}

@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"errors"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,9 +78,7 @@ func (o *oracle) write(rel, content string) string {
 // value with a "-" key prefix unsets.
 func (o *oracle) with(extra map[string]string) map[string]string {
 	env := make(map[string]string, len(o.env)+len(extra))
-	for k, v := range o.env {
-		env[k] = v
-	}
+	maps.Copy(env, o.env)
 	for k, v := range extra {
 		if name, ok := strings.CutPrefix(k, "-"); ok {
 			delete(env, name)
@@ -259,9 +258,7 @@ func (o *oracle) compareIn(t *testing.T, dir string, r repo, env map[string]stri
 		env = o.env
 	}
 	gitEnv := map[string]string{"GIT_DIR": r.gitDir}
-	for k, v := range env {
-		gitEnv[k] = v
-	}
+	maps.Copy(gitEnv, env)
 	want, res := o.gitList(dir, gitEnv)
 	cfg, err := Load(Options{GitDir: r.gitDir, CommonDir: r.gitDir, WorkTree: r.top, LookupEnv: lookup(env), Branch: branchOf(r.gitDir)})
 	if res.code != 0 {

@@ -75,9 +75,7 @@ func TestReadDirOwnsMetadata(t *testing.T) {
 	check()
 	var wg sync.WaitGroup
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 8 {
 				if _, err := ReadDir(second); err != nil {
 					t.Error(err)
@@ -85,7 +83,7 @@ func TestReadDirOwnsMetadata(t *testing.T) {
 				}
 				check()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

@@ -50,16 +50,14 @@ func (m *mirror) want(origins []git.Origin) {
 			continue
 		}
 		m.commits[o.Commit] = true
-		m.pending.Add(1)
-		go func() {
-			defer m.pending.Done()
+		m.pending.Go(func() {
 			if err := m.load(o); err != nil && m.ctx.Err() == nil {
 				m.mu.Lock()
 				delete(m.commits, o.Commit) // the next attach naming it tries again
 				m.mu.Unlock()
 				m.fault(fmt.Sprintf("git mirror: fetch %s from %s: %v; its files come over the link instead", o.Commit, o.URL, err))
 			}
-		}()
+		})
 	}
 }
 

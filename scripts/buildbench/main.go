@@ -362,9 +362,9 @@ func startCheckout(ctx context.Context, dir, bin, fixture string) (*target, erro
 // lastJSON returns the last line of out that looks like a JSON object.
 func lastJSON(out []byte) []byte {
 	lines := bytes.Split(bytes.TrimSpace(out), []byte("\n"))
-	for i := len(lines) - 1; i >= 0; i-- {
-		if bytes.HasPrefix(bytes.TrimSpace(lines[i]), []byte("{")) {
-			return lines[i]
+	for _, line := range slices.Backward(lines) {
+		if bytes.HasPrefix(bytes.TrimSpace(line), []byte("{")) {
+			return line
 		}
 	}
 	return out

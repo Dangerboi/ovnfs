@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/stencil-hq/ovnfs/git/internal/object"
@@ -266,8 +267,8 @@ func (g *commitGraph) total() uint32 {
 func (g *commitGraph) find(id object.ID) (uint32, bool) {
 	raw := id.Raw()
 	hashSize := len(raw)
-	for i := len(g.layers) - 1; i >= 0; i-- {
-		l := g.layers[i]
+	for _, l := range slices.Backward(g.layers) {
+
 		lo := uint32(0)
 		if raw[0] > 0 {
 			lo = binary.BigEndian.Uint32(l.fanout[(int(raw[0])-1)*4:])
@@ -293,8 +294,8 @@ func (g *commitGraph) find(id object.ID) (uint32, bool) {
 }
 
 func (g *commitGraph) layerOf(pos uint32) (*graphLayer, uint32, bool) {
-	for i := len(g.layers) - 1; i >= 0; i-- {
-		l := g.layers[i]
+	for _, l := range slices.Backward(g.layers) {
+
 		if pos >= l.base {
 			if pos-l.base >= l.n {
 				return nil, 0, false

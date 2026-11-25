@@ -209,7 +209,7 @@ func (r *Repo) fetchBranch(ctx context.Context, gitdir, branch, before, want str
 	}
 	updates := make([]branchUpdate, len(diff))
 	for i, c := range diff {
-		updates[i] = branchUpdate{BranchChange: BranchChange{Path: c.Path, Status: string(c.Status)}, old: c.Old, next: c.New}
+		updates[i] = branchUpdate{Path: c.Path, Status: string(c.Status), old: c.Old, next: c.New}
 	}
 	objects, err := r.repo.OpenObjects()
 	if err != nil {
@@ -518,7 +518,8 @@ func (r *Repo) transferPack(ctx context.Context, program string, src *repo.Repos
 	if to.Has(want) {
 		return nil // an empty pack is no pack to index
 	}
-	revs := want.String() + "\n"
+	var revs strings.Builder
+	revs.WriteString(want.String() + "\n")
 	tips, err := r.repo.Refs().List("refs/")
 	if err != nil {
 		return err
@@ -529,7 +530,7 @@ func (r *Repo) transferPack(ctx context.Context, program string, src *repo.Repos
 	for _, tip := range tips {
 		// The checkout reads r's objects too, but not one r was only promised.
 		if !tip.Symbolic() && from.Contains(tip.ID) {
-			revs += "^" + tip.ID.String() + "\n"
+			revs.WriteString("^" + tip.ID.String() + "\n")
 		}
 	}
 	env := append(gitEnv(), "GIT_NO_LAZY_FETCH=1")
@@ -540,7 +541,7 @@ func (r *Repo) transferPack(ctx context.Context, program string, src *repo.Repos
 		return err
 	}
 	var packErr, indexErr bytes.Buffer
-	pack.Env, pack.Stdin, pack.Stdout, pack.Stderr = env, strings.NewReader(revs), write, &packErr
+	pack.Env, pack.Stdin, pack.Stdout, pack.Stderr = env, strings.NewReader(revs.String()), write, &packErr
 	index.Env, index.Stdin, index.Stderr = env, read, &indexErr
 	packRun, indexRun := pack.Start(), index.Start()
 	// The children hold the pipe now; index-pack sees its end once pack-objects exits.
