@@ -499,8 +499,11 @@ directories named `_p<id>`. A create names one, which writes only its git direct
 concurrent creates. When only work-tree files changed, the prepared checkouts
 move onto the new capture, whose `git-template/` is written after the creates
 waiting on it have their checkouts; a change below `.git` discards them.
-Prepared checkouts are in no state: a restart removes them, and an unused
-capture is released after 15 minutes.
+A capture the work tree outgrew therefore stays, with its pool, until the next
+create recaptures or 15 minutes pass without a create; one whose pool cannot
+move (no repository, submodules) and one the repository's git state outgrew are
+released within a minute. Prepared checkouts are in no state: a restart
+removes them.
 
 ## Native filesystem reads
 

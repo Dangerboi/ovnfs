@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stencil-hq/ovnfs/api"
 )
@@ -175,6 +176,82 @@ func TestFolderCreatesReuseUnchangedCapture(t *testing.T) {
 
 	if got := f.newCheckout(dir, "rules", "local a.txt").Checkout.Base; got == committed.Base {
 		t.Fatal("a create with other rules reused a capture classified by different ones")
+	}
+}
+
+// TestCoolingKeepsMovablePools keeps a repository's warm capture and its
+// prepared checkouts past a work-tree edit, so the next create takes one of
+// them instead of discarding the pool and preparing another, and releases them
+// once the repository's git state moves on. A folder outside any repository,
+// whose pool cannot move, goes at its first edit.
+func TestCoolingKeepsMovablePools(t *testing.T) {
+	f := newFixture(t)
+	if f.reg.watcher == nil {
+		t.Skip("no folder events on this platform")
+	}
+	repo, plain := reuseRepo(t), folder(t, map[string]string{"a.txt": "one"})
+	// settled reports whether the folder at dir holds a full pool and fills it no more.
+	settled := func(dir string) bool {
+		f.reg.mu.RLock()
+		defer f.reg.mu.RUnlock()
+		folder := f.reuseFolder(dir)
+		return folder != nil && len(folder.pool) >= folder.poolTarget() && folder.filling == 0
+	}
+	// outgrown reports whether the folder at dir changed since its warm capture
+	// began, and whether its repository's git state did.
+	outgrown := func(dir string) (work, git bool) {
+		f.reg.mu.RLock()
+		defer f.reg.mu.RUnlock()
+		folder := f.reuseFolder(dir)
+		return folder.warmGen != folder.gen.Load(), folder.warmGitGen != folder.gitGen.Load()
+	}
+	f.newCheckout(repo, "first")
+	f.newCheckout(plain, "plain")
+	eventually(t, "the pools did not fill", func() bool { return settled(repo) && settled(plain) })
+	f.reg.mu.RLock()
+	var pool []string
+	for _, h := range f.reuseFolder(repo).pool {
+		pool = append(pool, h.meta.dir())
+	}
+	f.reg.mu.RUnlock()
+
+	write(t, filepath.Join(repo, "a.txt"), "two")
+	write(t, filepath.Join(plain, "a.txt"), "two")
+	eventually(t, "the edits were not seen", func() bool {
+		repoWork, _ := outgrown(repo)
+		plainWork, _ := outgrown(plain)
+		return repoWork && plainWork
+	})
+	if _, git := outgrown(repo); git {
+		t.Fatal("a work-tree edit counted as a change of git state")
+	}
+	f.reg.cool(time.Now())
+	if got := f.prepared(repo); got != len(pool) {
+		t.Fatalf("cooling after a work-tree edit left %d of %d prepared checkouts", got, len(pool))
+	}
+	if got := f.prepared(plain); got != 0 {
+		t.Fatalf("cooling after an edit kept %d prepared checkouts of a folder outside any repository", got)
+	}
+	f.newCheckout(repo, "edited")
+	f.reg.mu.RLock()
+	dir := f.reg.checkouts["edited"].meta.dir()
+	f.reg.mu.RUnlock()
+	if !slices.Contains(pool, dir) {
+		t.Fatalf("create after a work-tree edit opened %s, want one of the kept pool %v", dir, pool)
+	}
+	if got := f.read("edited", "a.txt"); got != "two" {
+		t.Fatalf("checkout after the edit serves %q", got)
+	}
+
+	eventually(t, "the pool did not refill", func() bool { return settled(repo) })
+	gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "later")
+	eventually(t, "the commit was not seen", func() bool {
+		_, git := outgrown(repo)
+		return git
+	})
+	f.reg.cool(time.Now())
+	if got := f.prepared(repo); got != 0 {
+		t.Fatalf("cooling after a commit kept %d prepared checkouts", got)
 	}
 }
 

@@ -788,8 +788,7 @@ func (f *reuseFolder) affectedBy(rel string) bool {
 	return true
 }
 
-// coolFolders releases warm captures that the folder outgrew or nobody reused for
-// warmTTL, with their pools, and forgets folders with no capture left.
+// coolFolders runs cool once a minute until the registry stops.
 func (r *Registry) coolFolders() {
 	defer r.workers.Done()
 	tick := time.NewTicker(time.Minute)
@@ -798,29 +797,54 @@ func (r *Registry) coolFolders() {
 		select {
 		case <-r.stop:
 			return
-		case <-tick.C:
-		}
-		var drained []*checkoutRecord
-		forgot := false
-		r.mu.Lock()
-		for root, f := range r.folders {
-			if f.capturing != nil || f.filling > 0 {
-				continue
-			}
-			if f.warm != nil && (f.warmGen != f.gen.Load() || time.Since(f.warmUsed) > warmTTL) {
-				drained = append(drained, r.coolLocked(f)...)
-			}
-			if f.warm == nil {
-				delete(r.folders, root)
-				forgot = true
-			}
-		}
-		r.mu.Unlock()
-		r.discardPrepared(drained)
-		if forgot {
-			r.wakeWatch()
+		case now := <-tick.C:
+			r.cool(now)
 		}
 	}
+}
+
+// cool releases the warm captures stale at now (see staleLocked), with their
+// pools, and forgets folders with no capture left.
+func (r *Registry) cool(now time.Time) {
+	var drained []*checkoutRecord
+	forgot := false
+	r.mu.Lock()
+	for root, f := range r.folders {
+		if f.capturing != nil || f.filling > 0 {
+			continue
+		}
+		if f.staleLocked(now) {
+			drained = append(drained, r.coolLocked(f)...)
+		}
+		if f.warm == nil {
+			delete(r.folders, root)
+			forgot = true
+		}
+	}
+	r.mu.Unlock()
+	r.discardPrepared(drained)
+	if forgot {
+		r.wakeWatch()
+	}
+}
+
+// staleLocked reports whether f's warm capture goes at now, with its pool:
+// nobody reused it for warmTTL, the repository's git state moved on, or the
+// folder changed and the pool cannot move onto its next capture (no template,
+// or submodules; see keepsPoolLocked). A capture only the work tree outgrew
+// stays for its pool, which the next create moves onto its own capture
+// (setWarmLocked) instead of discarding it and preparing another. r.mu is held.
+func (f *reuseFolder) staleLocked(now time.Time) bool {
+	switch {
+	case f.warm == nil:
+		return false
+	case now.Sub(f.warmUsed) > warmTTL, f.warmGitGen != f.gitGen.Load():
+		return true
+	case f.warmGen == f.gen.Load(), pending(f.warm.template):
+		// Unchanged, or the template being written decides whether the pool moves.
+		return false
+	}
+	return f.template.dir == "" || len(submodules(f.warm.view)) > 0
 }
 
 // resolveRoot returns the source root of folder dir as source.Resolve does,
