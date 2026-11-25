@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"syscall"
@@ -442,6 +443,9 @@ func TestBaseIdentities(t *testing.T) {
 // after an overlay rename, without a client first looking the name up, and
 // stays that name's: removing one name leaves the other's handle resolving.
 func TestLocateListedCacheHardlinkAfterWhiteout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows stat reports no link count, so hard-linked names share their inode's identity")
+	}
 	repo, dir := repository(t)
 	a := filepath.Join(dir, "target", "deps", "a")
 	writeTestFile(t, a, "artifact")

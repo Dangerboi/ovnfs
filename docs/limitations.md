@@ -53,7 +53,8 @@
   `diff`, `apply` or a snapshot's tree. Device nodes are refused.
 - NFSv3 locks are client-local. Explicit NFSv4 clients use byte-range locks
   held in the daemon's memory, lost when it restarts. SMB has no hard links
-  and no durable handles.
+  and no durable handles. On Windows, the names of a hard-linked file below a
+  cache or local root share one identity, as its stat reports no link count.
 - NFSv3 cannot push cache invalidations. The daemon refreshes its own mount's
   client for the paths a `pull` changed (see
   [platforms](platforms.md#nfs)), so those show at once; a reattach, which
