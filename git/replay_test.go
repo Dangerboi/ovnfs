@@ -25,17 +25,20 @@ func TestReplay(t *testing.T) {
 	testGit(t, r.Top, "commit", "-qm", "upstream already has first")
 	onto := testGit(t, r.Top, "rev-parse", "HEAD")
 
-	// Intentionally invalid injected config must not reach the replay.
-	t.Setenv("GIT_CONFIG_COUNT", "invalid")
+	// Injected config that would break the checkout must not reach the replay.
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.bare")
+	t.Setenv("GIT_CONFIG_VALUE_0", "true")
 	scratch := t.TempDir()
 	private, err := r.Replay(ctx, gitdir, tip, onto, scratch)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("GIT_CONFIG_COUNT", "0")
-	// The first patch is already upstream; the replay keeps the second's author.
-	want := "second:Original Author <author@localhost>"
-	if log := testGit(t, scratch, "log", "--reverse", "--format=%s:%an <%ae>", onto+"..HEAD"); log != want {
+	// The first patch is already upstream; the replay keeps the second's author
+	// and names the folder's committer.
+	want := "second:Original Author <author@localhost>:Test <test@localhost>"
+	if log := testGit(t, scratch, "log", "--reverse", "--format=%s:%an <%ae>:%cn <%ce>", onto+"..HEAD"); log != want {
 		t.Fatalf("replayed commits = %q, want %q", log, want)
 	}
 	if base := testGit(t, scratch, "rev-parse", "HEAD^"); base != onto {

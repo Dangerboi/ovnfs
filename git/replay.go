@@ -53,18 +53,23 @@ func (r *Repo) Replay(ctx context.Context, gitdir, tip, onto, scratch string) (s
 	if err != nil {
 		return "", err
 	}
+	// Replayed commits name the committer git would in r, as its reflog does.
+	committer, err := r.repo.Committer()
+	if err != nil {
+		return "", err
+	}
 	private := filepath.Join(scratch, ".git")
 	isolated := &Repo{Top: scratch}
 	// runGit discards repository redirects and disables hooks. Override the
-	// remaining Git environment as well (including injected config, identity,
-	// filters, and editor settings), with no config from outside scratch.
+	// remaining Git environment as well (including injected config, filters,
+	// and editor settings), with no config from outside scratch.
 	env := []string{
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=" + os.DevNull,
 		"GIT_ATTR_NOSYSTEM=1",
 		"GIT_ALLOW_PROTOCOL=",
-		"GIT_COMMITTER_NAME=ovnfs",
-		"GIT_COMMITTER_EMAIL=ovnfs@localhost",
+		"GIT_COMMITTER_NAME=" + committer.Name,
+		"GIT_COMMITTER_EMAIL=" + committer.Email,
 	}
 	run := func(output *strings.Builder, args ...string) error {
 		o := gitRun{env: env, ignoreGitEnv: true}
