@@ -194,6 +194,145 @@ func TestMemoryEvictsAcrossOverlays(t *testing.T) {
 	}
 }
 
+// TestMemoryFileLimit checks the last resident byte and the first spilled
+// byte, even when the copied-up file's backing slice has capacity for both.
+func TestMemoryFileLimit(t *testing.T) {
+	for _, limit := range []int64{2 << 20, 5 << 20} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			const name = "working"
+			lastSize := limit / 2
+			lower := tree(t, map[string]string{name: "seed"})
+			must(t, os.Truncate(filepath.Join(lower, name), lastSize))
+			f, err := New(t.TempDir(), nil, dirBottom{lower}, NewMemory(limit, DefaultFileMax(limit), 0))
+			must(t, err)
+			h, err := f.OpenFile(name, os.O_RDWR, 0)
+			must(t, err)
+			defer h.Close()
+			must(t, h.Truncate(lastSize-1))
+			w := h.(io.WriterAt)
+			_, err = w.WriteAt([]byte("a"), lastSize-1)
+			must(t, err)
+			if _, err := os.Stat(f.up(name)); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("file at %d bytes should still be resident: stat = %v", lastSize, err)
+			}
+			_, err = w.WriteAt([]byte("b"), lastSize)
+			must(t, err)
+			disk, err := os.Open(f.up(name))
+			must(t, err)
+			defer disk.Close()
+			var tail [2]byte
+			_, err = disk.ReadAt(tail[:], lastSize-1)
+			must(t, err)
+			if string(tail[:]) != "ab" {
+				t.Fatalf("tail across spill = %q, want ab", tail)
+			}
+		})
+	}
+}
+
+// TestLargeMemoryFileSpillsUnderPressure keeps the shared budget's small
+// artifacts resident when a larger writer on another checkout needs space.
+func TestLargeMemoryFileSpillsUnderPressure(t *testing.T) {
+	const limit = 2 << 20
+	mem := NewMemory(limit, DefaultFileMax(limit), 0)
+	artifacts, err := New(t.TempDir(), nil, nil, mem)
+	must(t, err)
+	working, err := New(t.TempDir(), nil, nil, mem)
+	must(t, err)
+	content := strings.Repeat("x", 24<<10)
+	for i := range 48 {
+		write(t, artifacts, fmt.Sprint(i), content, os.O_CREATE|os.O_WRONLY)
+	}
+	h, err := working.Create("large")
+	must(t, err)
+	defer h.Close()
+	must(t, h.Truncate(384<<10))
+	if _, err := os.Stat(working.up("large")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("large file should use spare budget: stat = %v", err)
+	}
+	must(t, h.Truncate(limit/2))
+	info, err := os.Stat(working.up("large"))
+	must(t, err)
+	if info.Size() != limit/2 {
+		t.Fatalf("spilled size = %d, want %d", info.Size(), limit/2)
+	}
+	for i := range 48 {
+		if _, err := os.Stat(artifacts.up(fmt.Sprint(i))); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("artifact %d should still be resident: stat = %v", i, err)
+		}
+	}
+}
+
+// TestSmallAdmissionSkipsLargeVictims forces a small create to disk rather
+// than staging a large resident file inline to free its share of the budget.
+func TestSmallAdmissionSkipsLargeVictims(t *testing.T) {
+	const limit = 2 << 20
+	mem := NewMemory(limit, DefaultFileMax(limit), 0)
+	large, err := New(t.TempDir(), nil, nil, mem)
+	must(t, err)
+	small, err := New(t.TempDir(), nil, nil, mem)
+	must(t, err)
+	for _, name := range []string{"a", "b"} {
+		h, err := large.Create(name)
+		must(t, err)
+		must(t, h.Truncate(limit/2-fileOverhead))
+		must(t, h.Close())
+	}
+	write(t, small, "new", "x", os.O_CREATE|os.O_WRONLY)
+	got, err := os.ReadFile(small.up("new"))
+	must(t, err)
+	if string(got) != "x" {
+		t.Fatalf("new disk file = %q, want x", got)
+	}
+	for _, name := range []string{"a", "b"} {
+		if _, err := os.Stat(large.up(name)); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("create spilled large victim %q: stat = %v", name, err)
+		}
+	}
+}
+
+// BenchmarkMemoryRandomWriteAt compares the old and budget-derived caps on
+// the same filled 32 MiB file; creation, block allocation and spill are untimed.
+func BenchmarkMemoryRandomWriteAt(b *testing.B) {
+	const budget, size, block = 64 << 20, 32 << 20, 4096
+	for _, tc := range []struct {
+		name string
+		max  int64
+	}{{"spilled", 256 << 10}, {"resident", DefaultFileMax(budget)}} {
+		b.Run(tc.name, func(b *testing.B) {
+			f, err := New(b.TempDir(), nil, nil, NewMemory(budget, tc.max, 0))
+			if err != nil {
+				b.Fatal(err)
+			}
+			h, err := f.Create("working")
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer h.Close()
+			if err := h.Truncate(size); err != nil {
+				b.Fatal(err)
+			}
+			w := h.(io.WriterAt)
+			var page [block]byte
+			page[0] = 1
+			for off := int64(0); off < size; off += block {
+				if _, err := w.WriteAt(page[:], off); err != nil {
+					b.Fatal(err)
+				}
+			}
+			rng := rand.New(rand.NewPCG(3, 7))
+			b.SetBytes(block)
+			b.ReportAllocs()
+			for b.Loop() {
+				off := int64(rng.IntN(size/block)) * block
+				if _, err := w.WriteAt(page[:], off); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // TestMemoryWritesBackIdleFiles moves files left untouched for the idle age
 // into the upper in the background, while an open handle keeps working and
 // files deleted before then never reach the disk.

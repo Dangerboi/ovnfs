@@ -33,17 +33,6 @@ import (
 	"github.com/stencil-hq/ovnfs/winfsp"
 )
 
-// memoryFileMax is the largest written file kept in memory; bigger files go
-// to disk, where writes already land in the page cache. 256 KiB keeps a
-// build's small short-lived files in memory (cargo fingerprints, dep-info
-// and temp files, and the median rlib of about 130 KB) while large outputs
-// (rlibs' 90th percentile is 1.7 MB, linked binaries tens of MB) leave
-// memory at their first 256 KiB instead of being buffered whole, so they do
-// not crowd the budget. 64 KiB made a replayed cold cargo build 16% slower
-// (scripts/buildbench): each mid-sized rlib then paid a spill's host create
-// while being written.
-const memoryFileMax = 256 << 10
-
 // Default serve budgets; see docs/internals.md (memory tiers).
 const (
 	defaultMemory    byteSize = 64 << 20
@@ -191,7 +180,8 @@ func (cmd *serveCmd) Run(c *cli) (err error) {
 	go releaseIdle()
 	var mem *overlay.Memory
 	if cmd.Memory > 0 {
-		mem = overlay.NewMemory(int64(cmd.Memory), memoryFileMax, memoryIdle)
+		limit := int64(cmd.Memory)
+		mem = overlay.NewMemory(limit, overlay.DefaultFileMax(limit), memoryIdle)
 		mem.SyncOnFsync = cmd.Fsync
 		mem.Logf = log.Printf
 	}

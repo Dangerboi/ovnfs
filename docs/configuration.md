@@ -26,6 +26,10 @@ width.
 `serve --memory SIZE` (`OVNFS_MEMORY`, default `64M`) and `serve --blob-cache
 SIZE` (`OVNFS_BLOB_CACHE`, default `16M`) size the memory tiers described in
 [internals](internals.md#memory-tiers); `start` passes the environment on.
+An individual written file can stay in memory up to half the `--memory`
+budget (32 MiB by default). Past 256 KiB of capacity it can grow only into
+spare space, not by evicting other files. Raising the budget can avoid disk
+writes to larger active files, but puts more unspilled data at risk on a crash.
 `serve --fsync` (or `OVNFS_FSYNC=1`) makes a handle sync on FUSE, SMB or
 WinFsp spill a named memory-backed file to the upper and sync its host file,
 and makes NFS [stable writes and COMMIT](platforms.md#nfs) sync theirs.

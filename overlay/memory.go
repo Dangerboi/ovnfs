@@ -24,6 +24,13 @@ import (
 // files still count against the budget.
 const fileOverhead = 256
 
+// smallFileMax is the data capacity a file may claim by evicting peers;
+// larger allocations use spare budget only. A cargo build's median rlib was
+// about 130 KB, and spilling at 64 KiB slowed a cold scripts/buildbench replay
+// by 16%. Keep room for those artifacts without letting large outputs crowd
+// them out or making a small writer pay a large output's spill cost.
+const smallFileMax = 256 << 10
+
 // victimScan bounds how many cold files one admission inspects for spilling.
 const victimScan = 64
 
@@ -72,6 +79,9 @@ type Memory struct {
 	lastErr error     // the latest spill failure of a parked file
 	writing bool      // the writeback worker runs
 }
+
+// DefaultFileMax caps one file's data at half the budget, leaving the rest for other files.
+func DefaultFileMax(limit int64) int64 { return limit / 2 }
 
 // NewMemory returns a budget of limit bytes that keeps files of up to fileMax
 // bytes, writing back files untouched for idle (0 keeps them until memory
@@ -240,10 +250,9 @@ func (mem *Memory) release(m *memFile) {
 	mem.mu.Unlock()
 }
 
-// victim picks the least recently used file other than keep that can spill
-// now: one of f's own (the caller holds f.mu) or another overlay's whose lock
-// it takes without waiting, so admissions never deadlock across overlays. The
-// caller holds mem.mu and must unlock a foreign owner after spilling.
+// victim picks the least recently used small file other than keep that can
+// spill now, so admission never pays for a large spill. The caller holds
+// mem.mu and f.mu; it must unlock a foreign owner after spilling.
 func (mem *Memory) victim(f *FS, keep *memFile) *memFile {
 	e := mem.lru.Back()
 	for range victimScan {
@@ -252,7 +261,7 @@ func (mem *Memory) victim(f *FS, keep *memFile) *memFile {
 		}
 		m := e.Value.(*memFile)
 		e = e.Prev()
-		if m == keep {
+		if m == keep || m.charged > fileOverhead+smallFileMax {
 			continue
 		}
 		if m.owner == f || m.owner.mu.TryLock() {
@@ -410,9 +419,9 @@ func (i memInfo) Identity() ident.ID { return i.id }
 
 // admit charges n more bytes to m, linking it into the budget's LRU, after
 // spilling least recently used files while the budget is exhausted. It reports
-// false when nothing more can spill, or while any file is parked so no new
-// data joins memory that may not reach the disk; the caller then keeps the
-// data on disk. The caller holds f.mu.
+// false when a large file would evict peers, nothing more can spill, or any
+// file is parked (so no new data joins memory that may not reach the disk).
+// The caller holds f.mu and falls back to disk on refusal.
 func (f *FS) admit(m *memFile, n int64) bool {
 	mem := f.mem
 	for {
@@ -421,7 +430,7 @@ func (f *FS) admit(m *memFile, n int64) bool {
 			mem.mu.Unlock()
 			return false
 		}
-		if mem.used+n <= mem.limit {
+		if n <= mem.limit-mem.used {
 			mem.used += n
 			m.charged += n
 			if m.elem == nil {
@@ -436,6 +445,10 @@ func (f *FS) admit(m *memFile, n int64) bool {
 			}
 			mem.mu.Unlock()
 			return true
+		}
+		if n > fileOverhead+smallFileMax-m.charged {
+			mem.mu.Unlock()
+			return false
 		}
 		v := mem.victim(f, m)
 		mem.mu.Unlock()
@@ -529,14 +542,15 @@ func readBounded(r io.Reader, size, limit int64) ([]byte, error) {
 // memory. Unlinked files cannot spill and grow unbudgeted.
 func (f *FS) grow(m *memFile, size int64) (bool, error) {
 	c := int64(cap(m.data))
+	// A copied-up slice may have spare capacity beyond the per-file limit.
+	if m.path != "" && size > f.mem.fileMax {
+		return false, f.spill(m)
+	}
 	if size <= c {
 		return true, nil
 	}
 	next := max(size, 2*c, 4096)
 	if m.path != "" {
-		if size > f.mem.fileMax {
-			return false, f.spill(m)
-		}
 		next = min(next, f.mem.fileMax)
 		if !f.admit(m, next-c) {
 			return false, f.spill(m)

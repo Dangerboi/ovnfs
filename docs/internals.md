@@ -548,11 +548,13 @@ identify an already-open parent by its handle.
 
 ## Memory tiers
 
-Written files start in memory, not in the upper: new and truncated files, and
-files of at most 256 KiB copied up for writing, share one budget across all
-checkouts (`--memory`, default 64 MiB). A file moves into its upper once it has been left
-untouched for 2 s, when it outgrows 256 KiB, when newer files need the budget
-(least recently used first), before a `chown` or lock, before a
+New files and immutable files copied up for writing share one memory budget
+across all checkouts (`--memory`, default 64 MiB). The per-file limit is half
+the budget (32 MiB by default); a larger immutable file copies directly to
+disk unless it is opened for truncation and starts empty. A file moves into
+its upper once it has been left untouched for 2 s, when it outgrows the
+per-file limit or cannot get space, when evicted to make room for another
+file, before a `chown` or lock, before a
 rename over a file already in the upper (so the host rename replaces the old
 copy atomically), and before
 `snap`, `fork`, `diff` and a planned stop, which therefore cost one host create
@@ -637,11 +639,17 @@ what only memory holds. The daemon logs the first failure of each checkout,
 and `ovnfs status` shows a `memory error` row with the waiting count and the
 latest error.
 
-The 256 KiB limit keeps a build's small short-lived files (cargo fingerprints,
-dep-info files, temporary files, most rlibs) in memory, while large outputs
-(big rlibs, linked binaries) reach the disk after their first 256 KiB instead
-of being buffered whole and copied out later. 64 KiB measured 16% slower on a
-replayed cold cargo build: mid-sized rlibs then spill while being written.
+Small files can evict other small files, least recently used first. If the
+budget is full of large files, a new file goes to disk rather than making its
+writer spill a large file synchronously. A file asking
+for more than 256 KiB of data capacity may use only spare space; if there
+isn't enough, it goes to disk rather than forcing a build's fingerprints,
+dep-info and temporary files to spill. With room to spare, random writes
+into an active 32 MiB file at the default budget update memory instead of
+making one host write per request. A crash can therefore lose more bytes of
+that file, and a later spill must copy more bytes to disk. Once a file is in
+the writable upper on disk it stays there: rewriting or truncating it does
+not bring it back into memory.
 
 Writable upper indexes load on demand and expire after a minute without
 index-dependent access, checked every ten seconds. Registering a checkout,
