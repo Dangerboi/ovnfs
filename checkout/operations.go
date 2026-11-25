@@ -44,6 +44,23 @@ type gitModule struct {
 	source.Repo
 }
 
+// sessionKey is the context key of the agent session a create opens its
+// checkout for (api.NewArgs.Session).
+type sessionKey struct{}
+
+// withSession has the checkout a create under ctx registers record session:
+// every way New and Fork open one ends in installCheckoutLocked or
+// openOnLocked, which read it back (sessionOf).
+func withSession(ctx context.Context, session string) context.Context {
+	return context.WithValue(ctx, sessionKey{}, session)
+}
+
+// sessionOf is the agent session withSession gave ctx; "" for none.
+func sessionOf(ctx context.Context) string {
+	session, _ := ctx.Value(sessionKey{}).(string)
+	return session
+}
+
 // New opens a checkout from any folder (captured and classified now), from a
 // snapshot, or on an existing capture as it was taken.
 func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, error) {
@@ -52,6 +69,7 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 		return api.NewReply{}, err
 	}
 	defer resume()
+	ctx = withSession(ctx, args.Session)
 	sources := 0
 	for _, set := range []bool{args.Dir != "", args.Snapshot != "", args.Base != ""} {
 		if set {
@@ -416,7 +434,7 @@ func (r *Registry) newOverlappingMount(ctx context.Context, dir string, args api
 	case len(args.Take) != 0 || len(args.Rules) != 0:
 		return api.NewReply{}, true, failure("invalid", "%s is checkout %s, which new forks; use the original source folder with --take or --rule", dir, name)
 	}
-	f, err := r.Fork(ctx, api.ForkArgs{Checkout: name, Name: args.Name})
+	f, err := r.Fork(ctx, api.ForkArgs{Checkout: name, Name: args.Name, Session: args.Session})
 	if err != nil {
 		return api.NewReply{}, true, err
 	}
@@ -657,6 +675,7 @@ func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *ba
 	}
 	h, err := r.prepareCheckout(name, name, b, layers, stack, parent, gs, r.lineageCheckoutsLocked(deref(parent)))
 	if err == nil {
+		h.meta.Session = sessionOf(ctx)
 		err = r.installWorkspace(h, ws)
 	}
 	if err == nil {
@@ -1068,6 +1087,7 @@ func (r *Registry) Fork(ctx context.Context, args api.ForkArgs) (api.ForkReply, 
 		return api.ForkReply{}, err
 	}
 	defer resume()
+	ctx = withSession(ctx, args.Session)
 	if err := checkContext(ctx); err != nil {
 		return api.ForkReply{}, err
 	}

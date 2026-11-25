@@ -77,8 +77,9 @@ result count, file filters or reported line width.
 
 When omp finds the ovnfs binary, it tells its agents to open ovnfs checkouts
 instead of git worktrees or copies, and uses this protocol to give
-each isolated subagent its own checkout (`new` when it starts, `rm` when its
-changes are merged back). The checkout's capture is the state the subagent
+each isolated subagent its own checkout (`new` when it starts, recording the
+session that spawned it, `rm` when its changes are merged back); `/wt` checkouts
+record the session moving into them. The checkout's capture is the state the subagent
 started from, so omp takes no baseline of it: the subagent's patch is
 `diff {binary}`, and a branch commit reads its baseline from a second checkout
 on the same capture (`new {base}`). A capture holding nested repositories or

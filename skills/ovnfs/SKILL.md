@@ -32,7 +32,8 @@ ovnfs rm fix-auth                   # remove the checkout and unused snapshots
 - Names: lowercase `[a-z0-9][a-z0-9._-]*`, up to 64 characters. Without
   `--name`, the checkout is named after the folder (`app`, then `app-2`, ...).
 - `ovnfs ls` lists checkouts and snapshots of removed checkouts (TOUCHED is
-  the last write through a checkout or to its git state); `ovnfs ls .` lists
+  the last write through a checkout or to its git state; SESSION, the omp
+  session that opened it); `ovnfs ls .` lists
   only checkouts of the current folder (a folder needs `.`, `..` or a slash);
   `ovnfs ls NAME` lists one checkout's snapshots.
 - `ovnfs prune [DIR] [--idle 7d] [--no-diff] [--dry-run]` removes the

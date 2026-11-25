@@ -813,7 +813,7 @@ func (r *Registry) checkoutLocked(h *checkoutRecord) api.Checkout {
 // describeLocked describes a checkout for replies, all but Dirty (see dirty).
 // The caller holds r.mu.
 func (r *Registry) describeLocked(h *checkoutRecord) api.Checkout {
-	return api.Checkout{Name: h.meta.Name, Path: filepath.Join(r.config.Mount, h.meta.Name), Source: h.source(), Base: h.meta.Base, Parent: deref(h.meta.Parent), Git: h.meta.Git, JJ: h.meta.JJ, Created: h.meta.Created, Touched: r.touched(h)}
+	return api.Checkout{Name: h.meta.Name, Path: filepath.Join(r.config.Mount, h.meta.Name), Source: h.source(), Base: h.meta.Base, Parent: deref(h.meta.Parent), Git: h.meta.Git, JJ: h.meta.JJ, Session: h.meta.Session, Created: h.meta.Created, Touched: r.touched(h)}
 }
 
 // dirty reports whether h's upper holds a change, for api.Checkout.Dirty. Like a

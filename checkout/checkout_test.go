@@ -414,6 +414,70 @@ func TestForkAndReopen(t *testing.T) {
 	}
 }
 
+// TestSessionSurvivesReopen checks that a checkout keeps the agent session that
+// opened it, however it was opened, across a restart, and that one opened
+// without a session has none.
+func TestSessionSurvivesReopen(t *testing.T) {
+	f := newFixture(t)
+	dir := folder(t, map[string]string{"a.txt": "a"})
+	ctx := context.Background()
+	var snapshot string
+	creates := []struct {
+		session string
+		open    func(session string) (api.Checkout, error)
+	}{
+		{"s-folder", func(s string) (api.Checkout, error) {
+			r, err := f.reg.New(ctx, api.NewArgs{Dir: dir, Name: "folder", Session: s})
+			return r.Checkout, err
+		}},
+		{"s-fork", func(s string) (api.Checkout, error) {
+			r, err := f.reg.Fork(ctx, api.ForkArgs{Checkout: "folder", Name: "fork", Session: s})
+			snapshot = r.Snapshot.ID
+			return r.Checkout, err
+		}},
+		// New on a checkout's folder forks it.
+		{"s-mount", func(s string) (api.Checkout, error) {
+			r, err := f.reg.New(ctx, api.NewArgs{Dir: filepath.Join(f.mount, "folder"), Name: "mount", Session: s})
+			return r.Checkout, err
+		}},
+		{"s-base", func(s string) (api.Checkout, error) {
+			r, err := f.reg.New(ctx, api.NewArgs{Base: "folder", Name: "base", Session: s})
+			return r.Checkout, err
+		}},
+		{"s-snapshot", func(s string) (api.Checkout, error) {
+			r, err := f.reg.New(ctx, api.NewArgs{Snapshot: snapshot, Name: "snapshot", Session: s})
+			return r.Checkout, err
+		}},
+		{"", func(s string) (api.Checkout, error) {
+			r, err := f.reg.New(ctx, api.NewArgs{Dir: dir, Name: "plain", Session: s})
+			return r.Checkout, err
+		}},
+	}
+	want := map[string]string{}
+	for _, c := range creates {
+		h, err := c.open(c.session)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h.Session != c.session {
+			t.Fatalf("%s opened with session %q, want %q", h.Name, h.Session, c.session)
+		}
+		want[h.Name] = c.session
+		f.awaitCaches(h.Name)
+	}
+	f.reg.Close()
+	f.open()
+	ls := f.ls()
+	if len(ls.Checkouts) != len(want) {
+		t.Fatalf("ls after reopen = %+v", ls.Checkouts)
+	}
+	for _, h := range ls.Checkouts {
+		if h.Session != want[h.Name] {
+			t.Fatalf("%s after reopen has session %q, want %q", h.Name, h.Session, want[h.Name])
+		}
+	}
+}
+
 // TestNewInsideMount checks that new on a checkout's folder forks that checkout
 // instead of capturing it through the daemon's own mount, also through a
 // symlink, and refuses the mount itself and folders below a checkout.

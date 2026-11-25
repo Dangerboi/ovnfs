@@ -257,6 +257,10 @@ DIR is in. DIR needs a path spelling (`.`, `..`, a slash), since a bare word
 names a checkout, whose snapshots `ls NAME` lists. When no checkout has that
 name, `ls NAME` lists the retained snapshots made under it. Plain `ls` lists
 snapshots without a known live owner separately, even if their name was reused.
+A checkout that `new`, `fork` or `run` opened from a command omp runs for an
+agent session records that session (`PI_SESSION_ID` in their environment), and
+`ls` shows it as SESSION (`session` in `--json`); the column appears once a
+listed checkout has one.
 
 `prune [DIR] [--idle DUR] [--no-diff]` removes, as `rm` does, every checkout
 matching all the criteria given: of DIR, untouched for DUR (`90m`, `12h`, `7d`,

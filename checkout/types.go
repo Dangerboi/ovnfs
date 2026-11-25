@@ -48,10 +48,11 @@ type checkoutMeta struct {
 	// named after the checkout: a checkout prepared before its name was known.
 	Dir     string    `json:"dir,omitempty"`
 	Base    string    `json:"base"`
-	Parent  *string   `json:"parent"`       // snapshot the checkout was created from
-	Head    *string   `json:"head"`         // the checkout's latest snapshot
-	Git     bool      `json:"git"`          // the checkout has a private git directory
-	JJ      string    `json:"jj,omitempty"` // its jj workspace's name, its .jj at the upper's root (see addWorkspace)
+	Parent  *string   `json:"parent"`            // snapshot the checkout was created from
+	Head    *string   `json:"head"`              // the checkout's latest snapshot
+	Git     bool      `json:"git"`               // the checkout has a private git directory
+	JJ      string    `json:"jj,omitempty"`      // its jj workspace's name, its .jj at the upper's root (see addWorkspace)
+	Session string    `json:"session,omitempty"` // agent session that opened it (api.NewArgs.Session; see withSession)
 	Created time.Time `json:"created"`
 	// MergeBases maps a merge source to a store tree of the leaves later merges
 	// take as their paths' base in place of the capture's. Between the checkout

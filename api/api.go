@@ -20,21 +20,23 @@ var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob"
 // "diff.paths" (DiffArgs.Paths), "diff.stat" (DiffArgs.Stat),
 // "new.base_checkout" (NewArgs.Base takes a checkout's name),
 // "glob.git_markers" (GlobArgs.GitMarkers), "land.rebase" (LandArgs.Rebase),
-// and "land.skip_dirty" (LandArgs.SkipDirty).
+// "land.skip_dirty" (LandArgs.SkipDirty), "new.session" (NewArgs.Session)
+// and "fork.session" (ForkArgs.Session).
 var Features = []string{"new.base", "diff.binary", "ls.select", "rm.sticky_snapshots", "prune.sticky_snapshots", "stop.keep_mount",
 	"pull.folder", "apply.atomic", "rm.keep_commits", "diff.paths", "diff.stat", "new.base_checkout", "glob.git_markers", "land.rebase",
-	"land.skip_dirty"}
+	"land.skip_dirty", "new.session", "fork.session"}
 
 // Checkout is an isolated, copy-on-write copy of a source folder that an agent works in.
 type Checkout struct {
 	Name    string    `json:"name"`
-	Path    string    `json:"path"`             // folder to cd into
-	Source  string    `json:"source"`           // folder the checkout was opened from
-	Base    string    `json:"base"`             // frozen capture the checkout sits on
-	Parent  string    `json:"parent,omitempty"` // snapshot the checkout was created from
-	Git     bool      `json:"git"`              // a working .git exists inside the checkout
-	JJ      string    `json:"jj,omitempty"`     // the checkout's jj workspace in its source's repository, when it is one
-	Dirty   bool      `json:"dirty"`            // changes since the last snapshot
+	Path    string    `json:"path"`              // folder to cd into
+	Source  string    `json:"source"`            // folder the checkout was opened from
+	Base    string    `json:"base"`              // frozen capture the checkout sits on
+	Parent  string    `json:"parent,omitempty"`  // snapshot the checkout was created from
+	Git     bool      `json:"git"`               // a working .git exists inside the checkout
+	JJ      string    `json:"jj,omitempty"`      // the checkout's jj workspace in its source's repository, when it is one
+	Dirty   bool      `json:"dirty"`             // changes since the last snapshot
+	Session string    `json:"session,omitempty"` // agent session that opened it (NewArgs.Session)
 	Created time.Time `json:"created"`
 	Touched time.Time `json:"touched"` // last change to its files or git state; Created until then
 }
@@ -131,6 +133,9 @@ type NewArgs struct {
 	Take     []string `json:"take,omitempty"`     // "SRC:PATH" overrides of the starting tree; SRC is "." (folder), "" (index) or a revision
 	Name     string   `json:"name,omitempty"`     // default: derived from the folder name
 	Rules    []string `json:"rules,omitempty"`    // extra rule lines, highest precedence
+	// Session names the agent session opening the checkout, which it keeps
+	// for ls; the CLI sends omp's PI_SESSION_ID from its environment.
+	Session string `json:"session,omitempty"`
 }
 
 // Capture summarizes how a source folder was classified when a checkout was opened.
@@ -160,6 +165,7 @@ type ForkArgs struct {
 	Checkout string `json:"checkout"`
 	Name     string `json:"name,omitempty"` // default: <checkout>-<n>
 	Label    string `json:"label,omitempty"`
+	Session  string `json:"session,omitempty"` // the child's, as NewArgs.Session
 }
 
 // ForkReply returns the parent's new snapshot and the child checkout, with

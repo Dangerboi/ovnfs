@@ -456,6 +456,7 @@ func (r *Registry) openOnLocked(ctx context.Context, b *baseRecord, template git
 		return api.NewReply{}, r.abandonCheckout(name, h, b, err)
 	}
 	delete(r.reserved, name)
+	h.meta.Session = sessionOf(ctx)
 	if err := r.addCheckoutLocked(name, h); err != nil {
 		r.mu.Unlock()
 		return api.NewReply{}, r.abandonCheckout(name, h, b, err)

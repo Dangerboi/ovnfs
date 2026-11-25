@@ -157,17 +157,26 @@ func printCheckouts(w io.Writer, r api.LsReply) {
 		}
 	}
 	if len(r.Checkouts) > 0 {
-		rows := [][]string{{paint(w, styleBold, "CHECKOUT"), paint(w, styleBold, "SOURCE"), paint(w, styleBold, "SNAPS"), paint(w, styleBold, "CHANGED"), paint(w, styleBold, "TOUCHED"), paint(w, styleBold, "PATH")}}
+		// SESSION only once an agent session opened one of them.
+		sessions := slices.ContainsFunc(r.Checkouts, func(h api.Checkout) bool { return h.Session != "" })
+		header := []string{paint(w, styleBold, "CHECKOUT"), paint(w, styleBold, "SOURCE"), paint(w, styleBold, "SNAPS"), paint(w, styleBold, "CHANGED"), paint(w, styleBold, "TOUCHED")}
+		if sessions {
+			header = append(header, paint(w, styleBold, "SESSION"))
+		}
+		rows := [][]string{append(header, paint(w, styleBold, "PATH"))}
 		for _, h := range r.Checkouts {
 			live[h.Name] = true
-			rows = append(rows, []string{
+			row := []string{
 				paint(w, styleAccent.Bold(true), h.Name),
 				paint(w, styleDim, h.Source),
 				fmt.Sprint(snaps[h.Name]),
 				paintIf(w, h.Dirty, styleYellow, paintIf(w, !h.Dirty, styleGreen, yesNo(h.Dirty))),
 				paint(w, styleDim, stamp(h.Touched)),
-				h.Path,
-			})
+			}
+			if sessions {
+				row = append(row, paint(w, styleDim, orDefault(h.Session, "-")))
+			}
+			rows = append(rows, append(row, h.Path))
 		}
 		table(w, rows)
 	}
@@ -308,6 +317,11 @@ func (cmd *newCmd) Run(c *cli) error {
 		}
 		a.Dir = dir
 	}
+	session, err := c.session("new.session")
+	if err != nil {
+		return err
+	}
+	a.Session = session
 	r, err := call[api.NewReply](c, "new", a)
 	if err != nil || c.json {
 		return err
@@ -373,7 +387,11 @@ type forkCmd struct {
 }
 
 func (cmd *forkCmd) Run(c *cli) error {
-	a := api.ForkArgs{Checkout: cmd.Checkout, Name: cmd.Name, Label: cmd.Label}
+	session, err := c.session("fork.session")
+	if err != nil {
+		return err
+	}
+	a := api.ForkArgs{Checkout: cmd.Checkout, Name: cmd.Name, Label: cmd.Label, Session: session}
 	r, err := call[api.ForkReply](c, "fork", a)
 	if err != nil || c.json {
 		return err
@@ -715,6 +733,25 @@ func printMerged(r api.ApplyReply, index bool) {
 		}
 		fmt.Fprintf(stdout, "%s %s: %s\n", paint(stdout, styleRed, verb), cf.Path, paint(stdout, styleDim, cf.Reason))
 	}
+}
+
+// sessionEnv is the variable omp sets, in every command it runs for an agent
+// session, to that session's id.
+const sessionEnv = "PI_SESSION_ID"
+
+// session is the agent session a create records (api.NewArgs.Session): the
+// one sessionEnv names, or "" without it or when the running daemon predates
+// feature, the create's field, since a daemon refuses fields it does not know.
+func (c *cli) session(feature string) (string, error) {
+	session := os.Getenv(sessionEnv)
+	if session == "" {
+		return "", nil
+	}
+	client, err := c.client()
+	if err != nil || !slices.Contains(client.Welcome().Features, feature) {
+		return "", err
+	}
+	return session, nil
 }
 
 // predates explains a daemon failure that only its age accounts for: when

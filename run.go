@@ -92,6 +92,9 @@ func (run *runCmd) Run(c *cli) error {
 	if err != nil {
 		return err
 	}
+	if o.new.Session, err = c.session("new.session"); err != nil {
+		return err
+	}
 	if o.on != "" {
 		return runRemote(c, o, cwd, signals)
 	}

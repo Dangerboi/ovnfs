@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
@@ -32,6 +33,25 @@ func TestPrintCheckoutsOrphanSnapshots(t *testing.T) {
 		if strings.Contains(got, "live-id") || live && !hasRow(got, "removed", "/current", "1", "no") {
 			t.Fatalf("wrong snapshot count for reused name in %q", got)
 		}
+	}
+}
+
+// TestPrintCheckoutsSession checks that ls adds a SESSION column only once a
+// checkout records the agent session that opened it, with "-" for the rest.
+func TestPrintCheckoutsSession(t *testing.T) {
+	touched := time.Now()
+	r := api.LsReply{Checkouts: []api.Checkout{{Name: "plain", Path: "/m/plain", Touched: touched}}}
+	var out strings.Builder
+	printCheckouts(&out, r)
+	if got := out.String(); strings.Contains(got, "SESSION") {
+		t.Fatalf("SESSION column without sessions in %q", got)
+	}
+	r.Checkouts = append(r.Checkouts, api.Checkout{Name: "agent", Path: "/m/agent", Touched: touched, Session: "0199c2e4-agent"})
+	out.Reset()
+	printCheckouts(&out, r)
+	got := out.String()
+	if !hasRow(got, "TOUCHED", "SESSION", "PATH") || !hasRow(got, "plain", stamp(touched), "-", "/m/plain") || !hasRow(got, "agent", "0199c2e4-agent", "/m/agent") {
+		t.Fatalf("sessions missing from %q", got)
 	}
 }
 
